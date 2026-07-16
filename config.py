@@ -54,9 +54,10 @@ MAX_SIGNAL_HISTORY = 200    # kept in memory / persisted to signals.json
 ENGINE_SIGNAL_FEED = False  # False: dashboard feed shows AI trade calls only;
                             # engine signals are still computed and persisted internally
 
-# ---- OpenRouter AI analyst (discretionary structure/liquidity read) ----
-# OPENROUTER_API_KEY is collected from the terminal at startup by server.py.
-# Set OPENROUTER_MODEL env var to pin a specific model (overrides priority list).
+# ---- Google Gemini AI analyst (discretionary structure/liquidity read) ----
+# GEMINI_API_KEY is collected from the terminal at startup by server.py.
+# Get a free key at https://aistudio.google.com
+# Set GEMINI_MODEL env var to pin a specific model (overrides priority list).
 AI_INTERVAL = "1h"          # primary chart the AI analyst monitors
 AI_HTF_INTERVAL = "4h"      # higher-timeframe chart used for top-down context
 AI_REFRESH_SECONDS = 60     # how often the AI re-analyzes each active symbol
@@ -67,15 +68,10 @@ AI_REFRESH_SECONDS = 60     # how often the AI re-analyzes each active symbol
 AI_MIN_RISK_REWARD = 1.2        # reject any LONG/SHORT below this R:R to TP1
 AI_MAX_ENTRY_ATR_DISTANCE = 2.5  # reject entries this many ATRs from live price (chase guard)
 
-# ---- OpenRouter model priority list ----
-# Models are tried in order.  When a model returns 429 it is skipped for
-# MODEL_RL_COOLDOWN seconds and the next one is tried automatically.
+# ---- Gemini model priority list ----
+# Models tried in order: gemini-2.0-flash → gemini-2.0-flash-lite → gemini-1.5-flash → gemini-1.5-flash-8b
+# When a model returns 429 it is skipped for MODEL_RL_COOLDOWN seconds.
 # The last successful model is cached and tried first on the next run.
-#
-# Setup:
-#   1. Get a free key at https://openrouter.ai
-#   2. Run python server.py — you will be prompted for the key in the terminal.
-#   3. Optionally set OPENROUTER_MODEL env var to pin a specific model.
 MODEL_RL_COOLDOWN = 90      # seconds to skip a rate-limited model before retrying
 
 # ---- Market regime (informational context only — not a gate) ----

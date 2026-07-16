@@ -52,16 +52,16 @@ def _prompt_for_keys() -> None:
     print("=" * 56)
     print()
 
-    # ---- OpenRouter ----
-    print("  OpenRouter API key is required for the AI analyst.")
-    print("  Get a free key at https://openrouter.ai")
+    # ---- Google Gemini ----
+    print("  Google Gemini API key is required for the AI analyst.")
+    print("  Get a free key at https://aistudio.google.com")
     print("  Press Enter to skip (AI analyst will be disabled).")
-    openrouter_key = getpass.getpass("  OpenRouter API key (sk-or-v1-...): ").strip()
-    if openrouter_key:
-        os.environ["OPENROUTER_API_KEY"] = openrouter_key
-        print("  [ok] OpenRouter key set.")
+    gemini_key = getpass.getpass("  Gemini API key: ").strip()
+    if gemini_key:
+        os.environ["GEMINI_API_KEY"] = gemini_key
+        print("  [ok] Gemini API key set.")
     else:
-        print("  [skip] No OpenRouter key — AI analyst disabled.")
+        print("  [skip] No Gemini key — AI analyst disabled.")
 
     print()
 
@@ -92,7 +92,7 @@ def _load_app_modules() -> None:
     """Import app modules after os.environ has been populated.
 
     This ensures ai_analyst.enabled is set correctly (it reads the
-    OpenRouter key at class instantiation time).
+    Gemini key at class instantiation time).
     """
     global config, ai_analyst, engine, manager
 
@@ -156,7 +156,7 @@ async def api_ai(request: web.Request) -> web.Response:
     if symbol not in config.SYMBOLS:
         return web.json_response({"error": "invalid symbol"}, status=400)
     if not ai_analyst.enabled:
-        return web.json_response({"error": "OPENROUTER_API_KEY not set"}, status=503)
+        return web.json_response({"error": "GEMINI_API_KEY not set"}, status=503)
     cached = ai_analyst.get_cached(symbol)
     if cached:
         return web.json_response(cached)
@@ -357,9 +357,9 @@ async def on_startup(app: web.Application) -> None:
     if ai_analyst.enabled:
         app["ai_task"]     = asyncio.create_task(_ai_loop())
         app["status_task"] = asyncio.create_task(_status_loop())
-        print("[ai] OpenRouter AI analyst enabled — auto model cycling active")
+        print("[ai] Google Gemini AI analyst enabled — auto model cycling active")
     else:
-        print("[ai] No OpenRouter key — AI analysis disabled")
+        print("[ai] No Gemini key — AI analysis disabled")
     if config.BINANCE_API_KEY:
         print("[binance] API key configured — authenticated endpoints available")
     else:
@@ -411,7 +411,7 @@ def _local_ip() -> str:
 
 if __name__ == "__main__":
     # 1. Prompt for keys BEFORE importing app modules.
-    #    ai_analyst reads OPENROUTER_API_KEY at class instantiation, so env
+    #    ai_analyst reads GEMINI_API_KEY at class instantiation, so env
     #    must be set first.
     _prompt_for_keys()
 

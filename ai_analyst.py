@@ -5,16 +5,14 @@ Pipeline (no regime or trade-quality gates — every bar gets a full AI read):
 
     Market data (engine.py)
         -> Signal memory context (signal_memory.py)     -- past similar setups
-        -> Primary AI analyst (Groq -> OpenRouter fallback, SYSTEM_PROMPT)
+        -> Primary AI analyst (Google Gemini, SYSTEM_PROMPT)
         -> Server-side risk gate (_apply_risk_gate)      -- re-checks the math
         -> AI critic (second opinion)                    -- tries to kill it
         -> Signal memory write
 
-Provider priority:
-    1. OpenRouter (OPENROUTER_API_KEY) — free tier with automatic model cycling
-    2. OpenRouter free models (OPENROUTER_API_KEY) — automatic fallback on
-       Groq 429.  Uses SYSTEM_PROMPT_ENHANCED, a more directive prompt tuned
-       for smaller/weaker models to still produce valid, conservative JSON.
+Provider:
+    Google Gemini REST API (GEMINI_API_KEY).
+    Models tried in order with per-model rate-limit cooldown.
 
 Pure Python — uses `requests` only, so it runs on Termux.
 """
@@ -38,33 +36,25 @@ from strategies.helpers import atr
 log = logging.getLogger("ai_analyst")
 
 # ---------------------------------------------------------------------------
-# Provider URLs
+# Provider — Google Gemini REST API
 # ---------------------------------------------------------------------------
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 
-# ---------------------------------------------------------------------------
-# Model lists
-# ---------------------------------------------------------------------------
-
-# Groq models — tried in order; first that responds is cached for the session.
-# OpenRouter free models — tried in order; first success is cached for session.
-# When a model returns 429 it is individually rate-limited for MODEL_RL_COOLDOWN
-# seconds and the next one is tried automatically.
-OPENROUTER_FREE_MODELS = [
+# Models tried in order; first success is cached for the session.
+# When a model returns 429 it is individually rate-limited for
+# MODEL_RL_COOLDOWN seconds and the next one is tried automatically.
+GEMINI_MODELS = [
     m for m in [
-        os.environ.get("OPENROUTER_MODEL", ""),   # user-pinned model (highest priority)
-        "meta-llama/llama-3.3-70b-instruct:free", # best free general model
-        "deepseek/deepseek-r1-0528:free",          # strong chain-of-thought reasoning
-        "google/gemini-2.0-flash-thinking-exp:free", # fast + smart
-        "qwen/qwen3-235b-a22b:free",               # very large model
-        "microsoft/phi-4-reasoning:free",          # strong reasoning
-        "meta-llama/llama-3.1-70b-instruct:free",  # reliable fallback
-        "mistralai/mistral-7b-instruct:free",      # lightweight fallback
+        os.environ.get("GEMINI_MODEL", ""),  # user-pinned model (highest priority)
+        "gemini-2.0-flash",                  # fast, capable, generous free tier
+        "gemini-2.0-flash-lite",             # lighter fallback
+        "gemini-1.5-flash",                  # reliable fallback
+        "gemini-1.5-flash-8b",               # smallest / last resort
     ] if m
 ]
 
 # ---------------------------------------------------------------------------
-# Primary system prompt  (used with Groq high-quality models)
+# Primary system prompt
 # ---------------------------------------------------------------------------
 SYSTEM_PROMPT = """You are a high-level discretionary crypto market analyst.
 
@@ -421,7 +411,7 @@ Otherwise, return WAIT."""
 
 
 # ---------------------------------------------------------------------------
-# Enhanced system prompt  (used with OpenRouter free / smaller models)
+# Enhanced system prompt  (used with smaller / fallback models)
 #
 # Design goals vs SYSTEM_PROMPT:
 #   - JSON schema shown first and repeated — weaker models lose the format
@@ -605,22 +595,9 @@ def _parse_env_value(line: str, key: str) -> str:
     return line.split("=", 1)[1].strip().strip('"').strip("'")
 
 
-def _get_openrouter_key():
-    """Read OPENROUTER_API_KEY from env or local .env file."""
-    key = os.environ.get("OPENROUTER_API_KEY", "").strip()
-    if key:
-        return key
-    base = os.path.dirname(__file__)
-    for name in (".env", ".env.local", ".env.development.local"):
-        try:
-            with open(os.path.join(base, name)) as fh:
-                for line in fh:
-                    val = _parse_env_value(line, "OPENROUTER_API_KEY")
-                    if val:
-                        return val
-        except OSError:
-            continue
-    return ""
+def _get_gemini_key():
+    """Read GEMINI_API_KEY from environment."""
+    return os.environ.get("GEMINI_API_KEY", "").strip()
 
 
 def _fnum(x, digits=6):
@@ -782,8 +759,8 @@ class AIAnalyst:
     def __init__(self):
         self._lock = threading.Lock()
         self._cache = {}          # symbol -> ai result dict
-        self._or_model = None     # last successful OpenRouter model (tried first next run)
-        self.enabled = bool(_get_openrouter_key())
+        self._or_model = None     # last successful Gemini model (tried first next run)
+        self.enabled = bool(_get_gemini_key())
         self.last_error = None
 
         # Engine status metrics
@@ -846,7 +823,7 @@ class AIAnalyst:
         return {
             "online": self.enabled,
             "version": "v4.4",
-            "provider": "openrouter",
+            "provider": "gemini",
             "active_models": len(config.WEIGHTS),  # strategy count (10)
             "latency_ms": self._last_latency,
             "inference_per_min": rate_per_min,
@@ -883,92 +860,80 @@ class AIAnalyst:
     # Low-level HTTP calls
     # -----------------------------------------------------------------------
 
-    def _post_model(self, url, headers, model, system_prompt, payload_text, timeout=45):
-        """Single HTTP POST to an OpenAI-compatible chat endpoint.
+    def _post_gemini_model(self, model, system_prompt, payload_text, timeout=60):
+        """Single HTTP POST to the Gemini generateContent REST endpoint.
         Returns (model, content_str) on success.
         Raises RuntimeError with a tag prefix for caller to inspect:
           - 'RATE_LIMIT:...'  → 429 received
           - 'MODEL_ERROR:...' → 400/404 model issue, try next model
+          - 'AUTH_ERROR:...'  → 401/403 bad key
           - 'HTTP_ERROR:...'  → other non-200 status
         """
-        resp = requests.post(
-            url,
-            headers=headers,
-            json={
-                "model": model,
+        key = _get_gemini_key()
+        url = f"{GEMINI_BASE_URL}/{model}:generateContent?key={key}"
+        body = {
+            "system_instruction": {"parts": [{"text": system_prompt}]},
+            "contents": [{"role": "user", "parts": [{"text": payload_text}]}],
+            "generationConfig": {
                 "temperature": 0.2,
-                "max_tokens": 700,
-                "response_format": {"type": "json_object"},
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": payload_text},
-                ],
+                "maxOutputTokens": 700,
+                "responseMimeType": "application/json",
             },
-            timeout=timeout,
-        )
+        }
+        resp = requests.post(url, json=body, timeout=timeout)
         if resp.status_code == 200:
-            body = resp.json()
-            content = body["choices"][0]["message"]["content"]
+            data = resp.json()
+            content = data["candidates"][0]["content"]["parts"][0]["text"]
             return model, content
         if resp.status_code == 429:
             raise RuntimeError(f"RATE_LIMIT:{model}: {resp.text[:120]}")
-        if resp.status_code == 401:
-            # Auth failure — key is wrong/missing; no point retrying other models.
+        if resp.status_code in (401, 403):
             raise RuntimeError(
-                f"AUTH_ERROR: OpenRouter returned 401 — your OPENROUTER_API_KEY is "
-                f"invalid or not set. Get a free key at https://openrouter.ai and add "
-                f"OPENROUTER_API_KEY=sk-or-v1-... to your .env file. ({resp.text[:120]})"
+                f"AUTH_ERROR: Gemini returned {resp.status_code} — your GEMINI_API_KEY "
+                f"is invalid or not set. Get a free key at https://aistudio.google.com "
+                f"({resp.text[:120]})"
             )
-        if resp.status_code in (400, 404) and "model" in resp.text.lower():
+        if resp.status_code in (400, 404):
             raise RuntimeError(f"MODEL_ERROR:{model}: {resp.status_code} {resp.text[:80]}")
         raise RuntimeError(f"HTTP_ERROR:{model}: {resp.status_code} {resp.text[:160]}")
 
-    def _call_openrouter_models(self, system_prompt, payload_text):
-        """Try each OpenRouter model in order, skipping rate-limited ones.
+    def _call_gemini_models(self, system_prompt, payload_text):
+        """Try each Gemini model in order, skipping rate-limited ones.
 
         Uses per-model cooldown tracking so a 429 on one model doesn't block
         the others.  The last successful model is cached and tried first next
         time.  Returns (model_name, content_str) on success.
         """
-        key = _get_openrouter_key()
-        if not key:
+        if not _get_gemini_key():
             raise RuntimeError(
-                "OPENROUTER_API_KEY not set — add it to your .env file. "
-                "Get a free key at https://openrouter.ai"
+                "GEMINI_API_KEY not set — restart server.py and enter your key. "
+                "Get a free key at https://aistudio.google.com"
             )
-        headers = {
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/NisalU/Now",
-            "X-Title": "AI Trading Signal Bot",
-        }
 
         # Build ordered candidate list: cached winner → rest
         candidates = [self._or_model] if self._or_model else []
-        candidates += [m for m in OPENROUTER_FREE_MODELS if m and m not in candidates]
+        candidates += [m for m in GEMINI_MODELS if m and m not in candidates]
 
         # Skip models still in individual rate-limit cooldown
         now_t = time.time()
         models = [m for m in candidates if now_t >= self._model_rl_until.get(m, 0)]
         skipped = [m for m in candidates if m not in models]
         if skipped:
-            log.info("Skipping rate-limited OpenRouter models: %s", skipped)
+            log.info("Skipping rate-limited Gemini models: %s", skipped)
         if not models:
-            raise RuntimeError("RATE_LIMIT:all OpenRouter models are individually rate-limited")
+            raise RuntimeError("RATE_LIMIT:all Gemini models are individually rate-limited")
 
         last_exc = None
         for model in models:
             try:
-                self._record_evt(stage="model_attempt", provider="openrouter", model=model)
-                result = self._post_model(
-                    OPENROUTER_URL, headers, model, system_prompt, payload_text, timeout=60
-                )
+                self._record_evt(stage="model_attempt", provider="gemini", model=model)
+                result = self._post_gemini_model(model, system_prompt, payload_text)
                 # Success — cache and clear individual cooldown
                 self._or_model = model
                 self._model_rl_until.pop(model, None)
                 self._active_models.add(model)
-                self._record_evt(stage="model_success", provider="openrouter", model=model)
-                log.info("OpenRouter success: model=%s", model)
+                self._record_evt(stage="model_success", provider="gemini", model=model)
+                log.info("Gemini success: model=%s", model)
                 return result
             except RuntimeError as e:
                 msg = str(e)
@@ -978,25 +943,25 @@ class AIAnalyst:
                 if msg.startswith("RATE_LIMIT:") or msg.startswith("MODEL_ERROR:"):
                     self._model_rl_until[model] = time.time() + self._MODEL_RL_SECONDS
                     if self._or_model == model:
-                        self._or_model = None   # stop hitting this model next call
+                        self._or_model = None
                     self._record_evt(
-                        stage="model_rate_limited", provider="openrouter", model=model,
+                        stage="model_rate_limited", provider="gemini", model=model,
                         message="Rate limited — trying next model",
                         cooldown_s=self._MODEL_RL_SECONDS,
                     )
-                    log.warning("OpenRouter rate limit on %s — trying next", model)
+                    log.warning("Gemini rate limit on %s — trying next", model)
                     continue
                 raise  # HTTP_ERROR or other — surface immediately
             except requests.RequestException as e:
                 last_exc = e
-                log.warning("OpenRouter request error for %s: %s", model, e)
+                log.warning("Gemini request error for %s: %s", model, e)
                 continue
 
-        raise RuntimeError(f"RATE_LIMIT:all OpenRouter models failed: {last_exc}")
+        raise RuntimeError(f"RATE_LIMIT:all Gemini models failed: {last_exc}")
 
     def _call_ai(self, payload_text):
-        """Primary AI analyst call — OpenRouter with automatic model cycling."""
-        return self._call_openrouter_models(SYSTEM_PROMPT, payload_text)
+        """Primary AI analyst call — Google Gemini with automatic model cycling."""
+        return self._call_gemini_models(SYSTEM_PROMPT, payload_text)
 
     # -----------------------------------------------------------------------
     # Risk gate
@@ -1077,7 +1042,7 @@ class AIAnalyst:
             },
         }
         try:
-            _, raw = self._call_openrouter_models(
+            _, raw = self._call_gemini_models(
                 CRITIC_PROMPT,
                 "Review this proposed trade call against its market context:\n"
                 + json.dumps(review_payload, separators=(",", ":")),
@@ -1197,8 +1162,8 @@ class AIAnalyst:
         model, raw = self._call_ai(user_text)
         latency_ms = int((time.time() - t0) * 1000)
 
-        # Infer provider from model name: OpenRouter models contain a "/"
-        provider = "openrouter" if model and "/" in model else "groq"
+        # Provider is always Gemini
+        provider = "gemini"
         self._record_evt(
             run_id=run_id, stage="ai_call", status="done", symbol=symbol,
             model=model, provider=provider, latency_ms=latency_ms,
@@ -1236,7 +1201,7 @@ class AIAnalyst:
             "engine_score": analysis["composite"],
             "model": model,
             "model_used": model,         # explicit alias for dashboard
-            "provider": provider,        # "groq" | "openrouter"
+            "provider": provider,        # "gemini"
             "signal": signal,
             "direction": signal if signal in ("LONG", "SHORT") else None,
             "setup_type": str(out.get("setup_type") or "none")[:80],
