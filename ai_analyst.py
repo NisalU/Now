@@ -475,6 +475,8 @@ class AIAnalyst:
             data = resp.json()
             content = data["candidates"][0]["content"]["parts"][0]["text"]
             return model, content
+        # Always print the real error so it can be diagnosed
+        print(f"[gemini] {model} HTTP {resp.status_code}: {resp.text[:300]}")
         if resp.status_code == 429:
             raise RuntimeError(f"RATE_LIMIT:{model}: {resp.text[:120]}")
         if resp.status_code in (401, 403):
