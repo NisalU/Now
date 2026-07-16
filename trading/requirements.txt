@@ -1,0 +1,35 @@
+# AI Crypto Trading System — Python dependencies
+# Python 3.12+
+
+# Web framework
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+starlette>=0.40.0
+
+# HTTP client (async)
+httpx>=0.27.0
+
+# WebSocket
+websockets>=12.0
+
+# AI
+groq>=0.9.0
+
+# Data processing
+numpy>=1.26.0
+
+# Configuration
+python-dotenv>=1.0.0
+pydantic>=2.7.0
+pydantic-settings>=2.3.0
+
+# Async file I/O
+aiofiles>=23.2.0
+
+# Utilities
+python-multipart>=0.0.9
+
+# Testing
+pytest>=8.2.0
+pytest-asyncio>=0.23.0
+httpx>=0.27.0

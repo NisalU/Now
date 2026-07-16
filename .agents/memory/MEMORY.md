@@ -1,0 +1,1 @@
+- [Replit path routing conflict](replit-path-routing.md) — artifact paths intercept before Vite proxy; rename /api claim in api-server to free it for Python backend.
