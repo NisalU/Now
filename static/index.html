@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#0b0f14" />
+  <title>Signal Bot — AI Trading Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="dot" id="live-dot" aria-hidden="true"></span>
+      <h1>SIGNAL<span>BOT</span></h1>
+      <span class="latency" id="latency" title="WebSocket round-trip latency"></span>
+    </div>
+    <div class="controls">
+      <label class="sr-only" for="symbol">Symbol</label>
+      <select id="symbol"></select>
+      <label class="sr-only" for="interval">Interval</label>
+      <select id="interval"></select>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- Verdict banner -->
+    <section class="card verdict" id="verdict-card" aria-live="polite">
+      <div class="verdict-left">
+        <div class="price-row">
+          <span class="big-price" id="price">&mdash;</span>
+          <span class="chg" id="chg"></span>
+        </div>
+        <div class="tape" id="tape" aria-hidden="true"></div>
+        <div class="verdict-badge neutral" id="verdict">CONNECTING&hellip;</div>
+      </div>
+      <div class="gauge-wrap">
+        <div class="gauge-labels"><span>SHORT</span><span>NEUTRAL</span><span>LONG</span></div>
+        <div class="gauge"><div class="gauge-needle" id="gauge-needle"></div></div>
+        <div class="gauge-score" id="gauge-score">0</div>
+      </div>
+    </section>
+
+    <!-- Two-column: AI Engine Status + Binance Key Status -->
+    <div class="status-row">
+      <!-- AI Engine Status widget -->
+      <section class="card engine-status-card" id="engine-status-card">
+        <div class="es-header">
+          <div class="es-title-row">
+            <span class="es-dot" id="es-dot"></span>
+            <span class="es-title">AI Engine <span id="es-status-label">Offline</span></span>
+          </div>
+          <span class="es-version" id="es-version">v4.2</span>
+        </div>
+        <div class="es-metrics">
+          <div class="es-metric">
+            <span class="es-metric-label">Models</span>
+            <span class="es-metric-value" id="es-models">&mdash;</span>
+          </div>
+          <div class="es-metric">
+            <span class="es-metric-label">Latency</span>
+            <span class="es-metric-value green" id="es-latency">&mdash;</span>
+          </div>
+          <div class="es-metric">
+            <span class="es-metric-label">Inference</span>
+            <span class="es-metric-value" id="es-inference">&mdash;</span>
+          </div>
+        </div>
+        <div class="es-waveform" aria-hidden="true">
+          <div class="wave-bars" id="wave-bars"></div>
+        </div>
+      </section>
+
+      <!-- Binance connection status -->
+      <section class="card binance-status-card" id="binance-status-card">
+        <div class="es-header">
+          <div class="es-title-row">
+            <span class="binance-icon">⬡</span>
+            <span class="es-title">Binance Exchange</span>
+          </div>
+          <span class="es-version" id="bnb-mode">Public</span>
+        </div>
+        <div class="es-metrics">
+          <div class="es-metric">
+            <span class="es-metric-label">API Key</span>
+            <span class="es-metric-value" id="bnb-key">&mdash;</span>
+          </div>
+          <div class="es-metric">
+            <span class="es-metric-label">API Secret</span>
+            <span class="es-metric-value" id="bnb-secret">&mdash;</span>
+          </div>
+          <div class="es-metric">
+            <span class="es-metric-label">Orders</span>
+            <span class="es-metric-value" id="bnb-orders">&mdash;</span>
+          </div>
+        </div>
+        <div class="bnb-hint" id="bnb-hint">
+          Set BINANCE_API_KEY &amp; BINANCE_API_SECRET in .env to enable authenticated trading.
+        </div>
+      </section>
+    </div>
+
+    <!-- Trade plan -->
+    <section class="card plan hidden" id="plan-card">
+      <h2>Trade Plan (ATR based)</h2>
+      <div class="plan-grid">
+        <div><span class="k">Entry</span><span class="v" id="plan-entry">&mdash;</span></div>
+        <div><span class="k">Stop</span><span class="v red" id="plan-stop">&mdash;</span></div>
+        <div><span class="k">TP 1</span><span class="v green" id="plan-tp1">&mdash;</span></div>
+        <div><span class="k">TP 2</span><span class="v green" id="plan-tp2">&mdash;</span></div>
+      </div>
+    </section>
+
+    <!-- Price chart -->
+    <section class="card">
+      <div class="card-head">
+        <h2>Live Price · EMA 7/25/99 · S/R · Fib · SMC</h2>
+        <div class="legend">
+          <span class="lg lg-ema7">EMA7</span>
+          <span class="lg lg-ema25">EMA25</span>
+          <span class="lg lg-ema99">EMA99</span>
+        </div>
+      </div>
+      <div id="chart" class="chart-main" role="img" aria-label="Live candlestick price chart with indicators"></div>
+    </section>
+
+    <!-- CVD chart -->
+    <section class="card">
+      <div class="card-head"><h2>Cumulative Volume Delta (CVD)</h2></div>
+      <div id="cvd-chart" class="chart-cvd" role="img" aria-label="Cumulative volume delta chart"></div>
+    </section>
+
+    <!-- Confluence breakdown -->
+    <section class="card">
+      <div class="card-head"><h2>Confluence Breakdown</h2></div>
+      <div id="breakdown" class="breakdown"></div>
+    </section>
+
+    <!-- Fundamentals -->
+    <section class="card" id="fund-card">
+      <div class="card-head"><h2>Fundamentals</h2></div>
+      <div class="plan-grid" id="fundamentals">
+        <div><span class="k">Funding</span><span class="v" id="f-funding">&mdash;</span></div>
+        <div><span class="k">OI &Delta; 24h</span><span class="v" id="f-oi">&mdash;</span></div>
+        <div><span class="k">Long/Short</span><span class="v" id="f-ls">&mdash;</span></div>
+        <div><span class="k">Mark</span><span class="v" id="f-mark">&mdash;</span></div>
+      </div>
+    </section>
+
+    <!-- Recent AI Signals table -->
+    <section class="card" id="ai-signals-table-card">
+      <div class="card-head">
+        <h2>Recent AI Signals</h2>
+        <span class="sig-count" id="sig-count"></span>
+      </div>
+      <div class="ai-sig-table-wrap">
+        <table class="ai-sig-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Symbol</th>
+              <th>Signal</th>
+              <th>Direction</th>
+              <th>Confidence</th>
+            </tr>
+          </thead>
+          <tbody id="ai-sig-tbody">
+            <tr class="ai-sig-empty">
+              <td colspan="5">No AI signals yet — watching for high-quality setups&hellip;</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- AI trade calls (detail feed) -->
+    <section class="card">
+      <div class="card-head"><h2>AI Trade Calls (1h)</h2></div>
+      <div id="signals" class="signals"><p class="empty">No trade call yet &mdash; the AI analyst is watching the 1h chart for an A+ setup.</p></div>
+    </section>
+
+    <footer class="disclaimer">
+      Educational tool &mdash; not financial advice. Signals are algorithmic confluence
+      scores, not guarantees. Trade at your own risk.
+    </footer>
+  </main>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
