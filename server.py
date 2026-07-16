@@ -325,11 +325,18 @@ async def _status_loop() -> None:
 async def _ai_loop() -> None:
     """Run AI analyst one symbol per cycle, rotating through active symbols.
 
-    Analyzing all symbols at once burns through free-tier RPM quotas.
-    Instead we pick one symbol per cycle (round-robin), so N symbols cost
-    1 API call every AI_REFRESH_SECONDS seconds instead of N calls.
+    Uses exponential backoff when all Gemini models are rate-limited so the
+    bot stops hammering a quota that is exhausted for the day.
+
+    Backoff schedule (consecutive all-fail cycles):
+      1st fail  →  wait 5 min  (normal cadence, might be transient)
+      2nd fail  →  wait 10 min
+      3rd fail  →  wait 20 min
+      4th+ fail →  wait 30 min (cap — retry once every half hour)
     """
     _symbol_queue: list[str] = []
+    _consecutive_failures = 0
+    _BACKOFF = [300, 600, 1200, 1800]  # seconds per failure count
 
     while True:
         try:
@@ -342,14 +349,25 @@ async def _ai_loop() -> None:
                 if s not in _symbol_queue:
                     _symbol_queue.append(s)
 
-            # Pick one symbol this cycle
-            if _symbol_queue:
-                symbol = _symbol_queue.pop(0)
-                _symbol_queue.append(symbol)  # move to back for next cycle
-            else:
-                symbol = config.DEFAULT_SYMBOL
+            symbol = _symbol_queue.pop(0) if _symbol_queue else config.DEFAULT_SYMBOL
+            if _symbol_queue is not None and symbol not in _symbol_queue:
+                _symbol_queue.append(symbol)
 
-            result           = await asyncio.to_thread(ai_analyst.analyze_safe, symbol)
+            result = await asyncio.to_thread(ai_analyst.analyze_safe, symbol)
+
+            # Detect all-rate-limited outcome vs real success
+            if result.get("error", "").startswith("RATE_LIMIT:"):
+                _consecutive_failures += 1
+                backoff = _BACKOFF[min(_consecutive_failures - 1, len(_BACKOFF) - 1)]
+                print(
+                    f"[ai] All Gemini models rate-limited (failure #{_consecutive_failures}). "
+                    f"Quota may be exhausted — backing off {backoff // 60} min before next attempt."
+                )
+                await asyncio.sleep(backoff)
+                continue
+            else:
+                _consecutive_failures = 0  # reset on success
+
             ai_payload       = {"type": "ai",               "data": result}
             status_payload   = {"type": "engine_status",    "data": ai_analyst.get_status()}
             signals_payload  = {"type": "ai_signals_table", "data": ai_analyst.get_recent_signals()}

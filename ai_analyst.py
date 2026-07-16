@@ -539,7 +539,7 @@ class AIAnalyst:
                         message="Rate limited — trying next model",
                         cooldown_s=self._MODEL_RL_SECONDS,
                     )
-                    log.warning("Gemini rate limit on %s — trying next", model)
+                    log.debug("Gemini rate limit on %s — trying next", model)
                     continue
                 raise  # HTTP_ERROR or other — surface immediately
             except requests.RequestException as e:
