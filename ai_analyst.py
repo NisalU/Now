@@ -898,6 +898,13 @@ class AIAnalyst:
             return model, content
         if resp.status_code == 429:
             raise RuntimeError(f"RATE_LIMIT:{model}: {resp.text[:120]}")
+        if resp.status_code == 401:
+            # Auth failure — key is wrong/missing; no point retrying other models.
+            raise RuntimeError(
+                f"AUTH_ERROR: OpenRouter returned 401 — your OPENROUTER_API_KEY is "
+                f"invalid or not set. Get a free key at https://openrouter.ai and add "
+                f"OPENROUTER_API_KEY=sk-or-v1-... to your .env file. ({resp.text[:120]})"
+            )
         if resp.status_code in (400, 404) and "model" in resp.text.lower():
             raise RuntimeError(f"MODEL_ERROR:{model}: {resp.status_code} {resp.text[:80]}")
         raise RuntimeError(f"HTTP_ERROR:{model}: {resp.status_code} {resp.text[:160]}")
@@ -952,6 +959,8 @@ class AIAnalyst:
             except RuntimeError as e:
                 msg = str(e)
                 last_exc = e
+                if msg.startswith("AUTH_ERROR"):
+                    raise  # bad key — no point trying other models
                 if msg.startswith("RATE_LIMIT:") or msg.startswith("MODEL_ERROR:"):
                     self._model_rl_until[model] = time.time() + self._MODEL_RL_SECONDS
                     if self._or_model == model:
