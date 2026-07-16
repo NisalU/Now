@@ -138,8 +138,9 @@
         </div>
       </div>
 
-      <!-- Stage row -->
+      <!-- Stage row — 4 stages: Data → Analyst → Critic → Out -->
       <div class="pipeline" id="pipeline" aria-label="AI API pipeline stages">
+
         <div class="pipe-stage" id="pipe-stage-0" data-stage="0">
           <div class="pipe-node">
             <div class="pipe-node-ring"></div>
@@ -173,7 +174,7 @@
             <div class="pipe-node-ring"></div>
             <div class="pipe-node-dot"></div>
           </div>
-          <div class="pipe-label">Risk Gate</div>
+          <div class="pipe-label">Critic Review</div>
           <div class="pipe-sub" id="pipe-sub-2">idle</div>
         </div>
 
@@ -187,22 +188,49 @@
             <div class="pipe-node-ring"></div>
             <div class="pipe-node-dot"></div>
           </div>
-          <div class="pipe-label">Critic</div>
-          <div class="pipe-sub" id="pipe-sub-3">idle</div>
-        </div>
-
-        <div class="pipe-connector" id="pipe-conn-3">
-          <div class="pipe-line"></div>
-          <div class="pipe-particle" id="pipe-particle-3"></div>
-        </div>
-
-        <div class="pipe-stage" id="pipe-stage-4" data-stage="4">
-          <div class="pipe-node">
-            <div class="pipe-node-ring"></div>
-            <div class="pipe-node-dot"></div>
-          </div>
           <div class="pipe-label">Signal Out</div>
-          <div class="pipe-sub" id="pipe-sub-4">—</div>
+          <div class="pipe-sub" id="pipe-sub-3">—</div>
+        </div>
+
+      </div>
+
+      <!-- Live AI analysis detail panel -->
+      <div class="pipe-detail-panel" id="pipe-detail-panel">
+        <!-- Analyst detail -->
+        <div class="pipe-detail-block" id="pipe-detail-analyst">
+          <div class="pipe-detail-row">
+            <span class="pipe-detail-key">Model</span>
+            <span class="pipe-detail-val" id="pd-model">—</span>
+          </div>
+          <div class="pipe-detail-row">
+            <span class="pipe-detail-key">Signal</span>
+            <span class="pipe-detail-val" id="pd-signal">—</span>
+          </div>
+          <div class="pipe-detail-row">
+            <span class="pipe-detail-key">Confidence</span>
+            <span class="pipe-detail-val" id="pd-confidence">—</span>
+          </div>
+          <div class="pipe-detail-row">
+            <span class="pipe-detail-key">Setup</span>
+            <span class="pipe-detail-val" id="pd-setup">—</span>
+          </div>
+          <div class="pipe-detail-row pipe-detail-reasoning-row">
+            <span class="pipe-detail-key">Reasoning</span>
+            <span class="pipe-detail-val pipe-detail-reasoning" id="pd-reasoning">—</span>
+          </div>
+        </div>
+
+        <!-- Critic detail -->
+        <div class="pipe-detail-block pipe-detail-critic" id="pipe-detail-critic">
+          <div class="pipe-critic-verdict" id="pd-critic-verdict">
+            <span class="pipe-critic-icon" id="pd-critic-icon">?</span>
+            <span class="pipe-critic-label" id="pd-critic-label">Waiting for critic…</span>
+          </div>
+          <div class="pipe-detail-row pipe-detail-reasoning-row" id="pd-critique-row" style="display:none">
+            <span class="pipe-detail-key">Critique</span>
+            <span class="pipe-detail-val pipe-detail-reasoning" id="pd-critique">—</span>
+          </div>
+          <div class="pipe-concerns" id="pd-concerns"></div>
         </div>
       </div>
 

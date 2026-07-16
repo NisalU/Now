@@ -783,19 +783,20 @@
   }
 
   /* ═══════════════════════════════════════════════════════════════════════════
-     API PIPELINE ANIMATION
-     5 stages: Market Data (0) → AI Analyst (1) → Risk Gate (2) → Critic (3) → Signal Out (4)
-     Animated with timed stage transitions and particle flow on connectors.
+     API PIPELINE ANIMATION  (4 stages — Risk Gate removed)
+     Stage 0: Market Data  →  Stage 1: AI Analyst  →
+     Stage 2: Critic Review  →  Stage 3: Signal Out
+     Animated with timed transitions and particle flow on connectors.
+     Detail panel below shows real AI data: model, confidence, reasoning, critic.
   ══════════════════════════════════════════════════════════════════════════════ */
 
   var _lastInferenceCount = 0;
   var _pipelineActive     = false;
   var _pipelineTimers     = [];
   var _pipeCallStart      = 0;
-  var _pipeLastAI         = null;   // last AI result for log
 
-  /* Sub-label copy for each stage */
-  var STAGE_SUBS = ["live feed", "calling model…", "checking risk…", "reviewing…", "—"];
+  /* Default sub-labels per stage while idle */
+  var STAGE_SUBS_IDLE = ["idle", "idle", "idle", "—"];
 
   function _clearPipelineTimers() {
     _pipelineTimers.forEach(clearTimeout);
@@ -821,7 +822,6 @@
     particle.className = "pipe-particle";
     void particle.offsetWidth;
     particle.className = "pipe-particle flowing" + (colorCls ? " " + colorCls : "");
-    // After particle arrives, leave line in flowing state
     setTimeout(function () {
       if (conn.classList.contains("flowing")) conn.className = "pipe-connector flowing";
     }, (dur || 0.65) * 1000);
@@ -835,107 +835,204 @@
 
   /** Reset all pipeline stages + connectors to idle */
   function _resetPipeline() {
-    for (var i = 0; i <= 4; i++) _setPipeStage(i, "idle", STAGE_SUBS[i] || "idle");
-    for (var j = 0; j <= 3; j++) {
+    for (var i = 0; i <= 3; i++) _setPipeStage(i, "idle", STAGE_SUBS_IDLE[i]);
+    for (var j = 0; j <= 2; j++) {
       var conn = document.getElementById("pipe-conn-" + j);
       if (conn) conn.className = "pipe-connector";
     }
   }
 
+  /** Update the AI Analyst detail panel with real data from the AI result */
+  function _updateAnalystDetail(ai) {
+    var model = (ai.model_used || ai.model || "—").replace(/:free$/, "");
+    var signal = ai.signal || "WAIT";
+    var conf   = ai.confidence || 0;
+    var setup  = ai.setup_type || "—";
+    var reasoning = (ai.reasoning || ai.orderflow_read || "—").slice(0, 220);
+    var prov   = ai.provider || (model.indexOf("/") >= 0 ? "openrouter" : "groq");
+
+    var modelEl = document.getElementById("pd-model");
+    var sigEl   = document.getElementById("pd-signal");
+    var confEl  = document.getElementById("pd-confidence");
+    var setupEl = document.getElementById("pd-setup");
+    var reasEl  = document.getElementById("pd-reasoning");
+
+    if (modelEl) {
+      modelEl.textContent = model || "—";
+      modelEl.className = "pipe-detail-val prov-" + prov;
+    }
+    if (sigEl) {
+      sigEl.textContent = signal;
+      sigEl.className   = "pipe-detail-val " +
+        (signal === "LONG" ? "sig-long" : signal === "SHORT" ? "sig-short" : "sig-wait");
+    }
+    if (confEl) confEl.textContent = conf ? conf + "%" : "—";
+    if (setupEl) setupEl.textContent = setup || "—";
+    if (reasEl)  reasEl.textContent  = reasoning;
+  }
+
+  /** Update the Critic detail panel */
+  function _updateCriticDetail(critic, signal, gateReason) {
+    var verdictEl  = document.getElementById("pd-critic-verdict");
+    var iconEl     = document.getElementById("pd-critic-icon");
+    var labelEl    = document.getElementById("pd-critic-label");
+    var critiqueEl = document.getElementById("pd-critique");
+    var critiqueRow = document.getElementById("pd-critique-row");
+    var concernsEl = document.getElementById("pd-concerns");
+
+    if (!verdictEl) return;
+
+    if (signal !== "LONG" && signal !== "SHORT") {
+      // WAIT from the AI itself — critic was never called
+      verdictEl.className = "pipe-critic-verdict skipped";
+      if (iconEl)  iconEl.textContent  = "—";
+      if (labelEl) labelEl.textContent = gateReason
+        ? "AI returned WAIT — " + gateReason.slice(0, 80)
+        : "AI returned WAIT (no trade setup)";
+      if (critiqueRow) critiqueRow.style.display = "none";
+      if (concernsEl)  concernsEl.innerHTML = "";
+      return;
+    }
+
+    if (!critic) {
+      // Critic disabled or failed — signal passes through
+      verdictEl.className = "pipe-critic-verdict approved";
+      if (iconEl)  iconEl.textContent  = "✓";
+      if (labelEl) labelEl.textContent = "APPROVED (critic not called)";
+      if (critiqueRow) critiqueRow.style.display = "none";
+      if (concernsEl)  concernsEl.innerHTML = "";
+      return;
+    }
+
+    var approved = critic.approve !== false;
+    verdictEl.className = "pipe-critic-verdict " + (approved ? "approved" : "rejected");
+    if (iconEl)  iconEl.textContent  = approved ? "✓" : "✗";
+    if (labelEl) labelEl.textContent = approved ? "APPROVED by critic" : "REJECTED by critic";
+
+    var critique = critic.critique || "";
+    if (critiqueEl) critiqueEl.textContent = critique || (approved ? "No concerns." : "Rejected.");
+    if (critiqueRow) critiqueRow.style.display = critique ? "" : "none";
+
+    // Concerns list
+    if (concernsEl) {
+      concernsEl.innerHTML = "";
+      (critic.concerns || []).slice(0, 4).forEach(function (c) {
+        var d = document.createElement("div");
+        d.className = "pipe-concern-item";
+        d.textContent = c;
+        concernsEl.appendChild(d);
+      });
+    }
+  }
+
   /**
    * Kick off mid-flight animation — called when engine_status shows a new inference.
-   * At this point we don't know the result yet; show stages 0→1 active.
+   * At this point we don't have the result yet; animate stage 0→1 active.
    */
   function triggerPipelineInFlight(model, provider) {
-    if (_pipelineActive) return;   // already running, wait for result
+    if (_pipelineActive) return;
     _pipelineActive = true;
     _pipeCallStart  = Date.now();
     _clearPipelineTimers();
 
-    // Stage 0: Market Data — mark done immediately (data was already fetched)
+    // Stage 0: Market Data done immediately (data already fetched)
     _setPipeStage(0, "done", "fetched");
     _flowConnector(0, "", 0.5);
 
     _pipelineTimers.push(setTimeout(function () {
       _doneConnector(0, "done");
-      // Stage 1: AI Analyst — active (thinking)
       var shortModel = (model || "").replace(/:free$/, "").split("/").pop() || "model";
-      _setPipeStage(1, "active", shortModel);
-      _flowConnector(1, "", 0.8);
-    }, 550));
+      _setPipeStage(1, "active", shortModel + "…");
+    }, 560));
   }
 
   /**
-   * Complete the pipeline animation when the AI result arrives.
-   * signal: "LONG" | "SHORT" | "WAIT" | null
-   * model, provider: for display
-   * latencyMs: round-trip latency
+   * Complete the pipeline animation when the full AI result arrives.
+   * ai: full AI result dict from WebSocket 'ai' message
    */
-  function completePipeline(signal, model, provider, latencyMs) {
+  function completePipeline(ai) {
     _pipelineActive = false;
     _clearPipelineTimers();
 
-    var sigClass = signal === "LONG" ? "done-long" : signal === "SHORT" ? "done-short" : "wait";
+    var signal    = ai.signal || "WAIT";
+    var model     = ai.model_used || ai.model || null;
+    var provider  = ai.provider || null;
+    var latencyMs = ai.latency_ms || (Date.now() - _pipeCallStart);
+    var critic    = ai.critic || null;
+    var gateReason = ai.gate_reason || null;
+    var conf      = ai.confidence || 0;
+
+    var sigClass  = signal === "LONG" ? "done-long" : signal === "SHORT" ? "done-short" : "wait";
     var connClass = signal === "LONG" ? "long" : signal === "SHORT" ? "short" : "done";
     var shortModel = (model || "").replace(/:free$/, "").split("/").pop() || "model";
 
-    // If pipeline wasn't started (no in-flight), do a fast run-through
+    // Ensure stage 0 is done
     if (!document.getElementById("pipe-stage-0").classList.contains("done")) {
       _setPipeStage(0, "done", "fetched");
     }
-
-    // Stage 1 complete
-    _setPipeStage(1, "done", shortModel);
     _doneConnector(0, connClass);
+
+    // Stage 1: AI Analyst — complete with confidence
+    var analystSub = shortModel + (conf ? " · " + conf + "%" : "");
+    _setPipeStage(1, "done", analystSub);
+    _updateAnalystDetail(ai);
     _flowConnector(1, connClass, 0.45);
 
     _pipelineTimers.push(setTimeout(function () {
       _doneConnector(1, connClass);
-      // Stage 2: Risk Gate
-      _setPipeStage(2, "active", "evaluating…");
-      _flowConnector(2, connClass, 0.4);
+
+      // Stage 2: Critic Review
+      _setPipeStage(2, "active", "reviewing…");
+      _flowConnector(2, connClass, 0.5);
 
       _pipelineTimers.push(setTimeout(function () {
         _doneConnector(2, connClass);
-        if (signal === "LONG" || signal === "SHORT") {
-          // Stage 3: Critic
-          _setPipeStage(2, "done", "passed");
-          _setPipeStage(3, "active", "reviewing…");
-          _flowConnector(3, connClass, 0.45);
 
-          _pipelineTimers.push(setTimeout(function () {
-            _doneConnector(3, connClass);
-            _setPipeStage(3, "done", "approved");
-            // Stage 4: Signal Out
-            _setPipeStage(4, sigClass,
-              signal === "LONG" ? "▲ LONG" : signal === "SHORT" ? "▼ SHORT" : "WAIT");
-          }, 500));
+        // Determine critic verdict for display
+        var criticApproved = !critic || critic.approve !== false;
+        var criticState    = signal === "WAIT" ? "wait"
+          : criticApproved ? (signal === "LONG" ? "done-long" : "done-short")
+          : "wait";  // critic rejected → overridden to WAIT
+
+        var criticSub;
+        if (signal !== "LONG" && signal !== "SHORT") {
+          criticSub = "skipped (WAIT)";
+        } else if (!critic) {
+          criticSub = "approved";
+        } else if (criticApproved) {
+          criticSub = "✓ approved";
         } else {
-          // WAIT — risk gate stops here
-          _setPipeStage(2, "wait", "wait");
-          _setPipeStage(3, "idle", "—");
-          _setPipeStage(4, "wait", "WAIT");
-          _doneConnector(3, "done");
+          criticSub = "✗ rejected";
         }
-      }, 450));
+        _setPipeStage(2, criticState, criticSub);
+        _updateCriticDetail(critic, signal, gateReason);
+
+        // Stage 3: Signal Out
+        var outSub;
+        if (signal === "LONG")       outSub = "▲ LONG";
+        else if (signal === "SHORT") outSub = "▼ SHORT";
+        else if (gateReason)         outSub = "WAIT · " + gateReason.slice(0, 40);
+        else                         outSub = "WAIT";
+
+        _pipelineTimers.push(setTimeout(function () {
+          _setPipeStage(3, sigClass, outSub);
+        }, 350));
+
+      }, 520));
     }, 500));
 
-    // Update meta row
+    // Meta row
     var lastCallEl = document.getElementById("pipe-last-call");
     var durationEl = document.getElementById("pipe-duration");
-    var elapsed = latencyMs || (Date.now() - _pipeCallStart);
     if (lastCallEl) lastCallEl.textContent = "Last call: just now";
-    if (durationEl) durationEl.textContent = elapsed + "ms";
+    if (durationEl) durationEl.textContent = latencyMs + "ms";
 
-    // Log entry
-    addPipelineLogEntry(signal, model, provider, elapsed);
+    addPipelineLogEntry(signal, model, provider, latencyMs, conf, gateReason, critic);
 
-    // Reset idle after 20 s
+    // Reset idle after 30 s
     _pipelineTimers.push(setTimeout(function () {
       _resetPipeline();
-      var lastCallEl2 = document.getElementById("pipe-last-call");
-      if (lastCallEl2 && elapsed) lastCallEl2.textContent = "Last call: " + Math.round(elapsed / 1000) + "s ago";
-    }, 20000));
+    }, 30000));
   }
 
   /* Keep updating "X ago" on the last-call label */
@@ -953,7 +1050,7 @@
   /* Pipeline call log (max 30 entries) */
   var _logEntries = 0;
 
-  function addPipelineLogEntry(signal, model, provider, latencyMs) {
+  function addPipelineLogEntry(signal, model, provider, latencyMs, conf, gateReason, critic) {
     _lastCallTime = Date.now();
     var logEl = document.getElementById("pipe-log");
     if (!logEl) return;
@@ -961,22 +1058,32 @@
     var empty = logEl.querySelector(".pipe-log-empty");
     if (empty) empty.remove();
 
-    // Build entry
     var row = document.createElement("div");
     row.className = "pipe-log-row new-entry";
 
-    var now = new Date().toLocaleTimeString("en-US", { hour12: false });
-    var shortModel = (model || "unknown").replace(/:free$/, "");
-    var provCls    = provider === "groq" ? "groq" : provider === "openrouter" ? "openrouter" : "unknown";
-    var sigCls     = signal === "LONG" ? "long" : signal === "SHORT" ? "short" : "wait";
-    var sigLabel   = signal || "WAIT";
+    var now      = new Date().toLocaleTimeString("en-US", { hour12: false });
+    var provCls  = provider === "groq" ? "groq" : provider === "openrouter" ? "openrouter" : "unknown";
+    var sigCls   = signal === "LONG" ? "long" : signal === "SHORT" ? "short" : "wait";
+    var sigLabel = signal || "WAIT";
+
+    // Critic verdict suffix
+    var criticTag = "";
+    if (signal === "LONG" || signal === "SHORT") {
+      if (critic) {
+        criticTag = critic.approve !== false
+          ? '<span class="pipe-log-critic-ok">✓</span>'
+          : '<span class="pipe-log-critic-no">✗</span>';
+      }
+    }
+
+    // Confidence badge
+    var confTag = conf ? '<span class="pipe-log-conf">' + conf + '%</span>' : "";
 
     row.innerHTML =
       '<span class="pipe-log-time">' + now + '</span>' +
-      '<span class="pipe-log-model ' + provCls + '">' +
-        (provider || "?").toUpperCase() +
-      '</span>' +
+      '<span class="pipe-log-model ' + provCls + '">' + (provider || "?").toUpperCase() + '</span>' +
       '<span class="pipe-log-signal ' + sigCls + '">' + sigLabel + '</span>' +
+      criticTag + confTag +
       '<span class="pipe-log-sym">' + (symbolEl ? symbolEl.value : "") + '</span>' +
       '<span class="pipe-log-lat">' + (latencyMs || "—") + 'ms</span>';
 
@@ -984,7 +1091,6 @@
     setTimeout(function () { row.classList.remove("new-entry"); }, 1000);
 
     _logEntries++;
-    // Cap at 30 rows
     while (logEl.children.length > 30) logEl.removeChild(logEl.lastChild);
   }
 
@@ -1201,14 +1307,9 @@
     lastAI = a;
     renderAI(a);
 
-    // Complete the pipeline animation with the result
+    // Complete the pipeline animation with the full result object
     if (a && !a.error) {
-      completePipeline(
-        a.signal || "WAIT",
-        a.model_used || a.model || null,
-        a.provider || null,
-        a.latency_ms || null
-      );
+      completePipeline(a);
     } else {
       // Error path — reset pipeline
       _pipelineActive = false;

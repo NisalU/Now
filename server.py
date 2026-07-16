@@ -96,9 +96,18 @@ async def ws_endpoint(request: web.Request) -> web.WebSocketResponse:
     client = Client(ws)
 
     async def sender():
-        while True:
-            msg = await client.queue.get()
-            await ws.send_str(json.dumps(msg))
+        """Drain the client queue and write to the WebSocket.
+        Exits cleanly on cancellation or any send error (closed socket, etc.)."""
+        try:
+            while True:
+                msg = await client.queue.get()
+                try:
+                    await ws.send_str(json.dumps(msg, default=str))
+                except Exception:
+                    # Socket closed or send failed — stop draining silently.
+                    break
+        except asyncio.CancelledError:
+            pass
 
     send_task = asyncio.create_task(sender())
     try:

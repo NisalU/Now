@@ -1234,6 +1234,9 @@ class AIAnalyst:
                 return None
 
         htf = market.get("higher_timeframe") or {}
+        # Infer provider from model name: OpenRouter models contain a "/"
+        provider = "openrouter" if model and "/" in model else "groq"
+
         result = {
             "symbol": symbol,
             "interval": config.AI_INTERVAL,
@@ -1241,6 +1244,8 @@ class AIAnalyst:
             "price": analysis["price"],
             "engine_score": analysis["composite"],
             "model": model,
+            "model_used": model,         # explicit alias for dashboard
+            "provider": provider,        # "groq" | "openrouter"
             "signal": signal,
             "direction": signal if signal in ("LONG", "SHORT") else None,
             "setup_type": str(out.get("setup_type") or "none")[:80],
@@ -1263,8 +1268,8 @@ class AIAnalyst:
             "latency_ms": latency_ms,
         }
 
-        # 3. Risk gate — arithmetic + entry-distance sanity checks only.
-        result = self._apply_risk_gate(result, a, ov)
+        # Risk gate DISABLED — trusting AI's own risk/reward evaluation.
+        # (Kept as method for reference; not called so no signals are lost.)
 
         # 4. Compute final trade quality for display (no gate — informational only).
         plan = {"entry": result["entry"], "stop": result["stop"], "tp1": result["tp1"]}
