@@ -57,7 +57,7 @@ OPENROUTER_FREE_MODELS = [
         "deepseek/deepseek-r1-0528:free",          # strong chain-of-thought reasoning
         "google/gemini-2.0-flash-thinking-exp:free", # fast + smart
         "qwen/qwen3-235b-a22b:free",               # very large model
-        "microsoft/phi-4-reasoning-plus:free",     # strong reasoning
+        "microsoft/phi-4-reasoning:free",          # strong reasoning
         "meta-llama/llama-3.1-70b-instruct:free",  # reliable fallback
         "mistralai/mistral-7b-instruct:free",      # lightweight fallback
     ] if m
