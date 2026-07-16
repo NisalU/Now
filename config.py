@@ -27,12 +27,9 @@ FUTURES_ENDPOINTS = [
 
 REFRESH_SECONDS = 20        # background analysis loop interval
 
-# ---- Binance API credentials (optional) ----
+# ---- Binance API credentials (required) ----
 # These are set at runtime by server.py after prompting the user in the
 # terminal.  Do NOT put keys in a .env file or hardcode them here.
-# Required for: account info, order placement, private endpoints.
-# Not required for: market data (klines, ticker, futures stats).
-# With an API key, public endpoints also benefit from higher rate limits.
 BINANCE_API_KEY = ""
 BINANCE_API_SECRET = ""
 

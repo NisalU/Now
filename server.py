@@ -66,19 +66,22 @@ def _prompt_for_keys() -> None:
     print()
 
     # ---- Binance ----
-    print("  Binance API credentials are OPTIONAL.")
-    print("  Needed only for: account info, order placement.")
-    print("  Without them the bot still receives all public market data.")
-    print("  Press Enter to skip either field.")
-    binance_key    = getpass.getpass("  Binance API key    (optional): ").strip()
-    binance_secret = getpass.getpass("  Binance API secret (optional): ").strip()
-    if binance_key:
-        os.environ["BINANCE_API_KEY"] = binance_key
-        print("  [ok] Binance API key set.")
-    else:
-        print("  [skip] No Binance API key — public endpoints only.")
-    if binance_secret:
-        os.environ["BINANCE_API_SECRET"] = binance_secret
+    print("  Binance API credentials are REQUIRED.")
+    while True:
+        binance_key = getpass.getpass("  Binance API key: ").strip()
+        if binance_key:
+            break
+        print("  [error] Binance API key cannot be empty. Please enter your key.")
+    os.environ["BINANCE_API_KEY"] = binance_key
+    print("  [ok] Binance API key set.")
+
+    while True:
+        binance_secret = getpass.getpass("  Binance API secret: ").strip()
+        if binance_secret:
+            break
+        print("  [error] Binance API secret cannot be empty. Please enter your secret.")
+    os.environ["BINANCE_API_SECRET"] = binance_secret
+    print("  [ok] Binance API secret set.")
 
     print()
     print("=" * 56)
