@@ -45,11 +45,11 @@ GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 # MODEL_RL_COOLDOWN seconds and the next one is tried automatically.
 GEMINI_MODELS = [
     m for m in [
-        os.environ.get("GEMINI_MODEL", ""),  # user-pinned model (highest priority)
-        "gemini-2.0-flash",                  # fast, capable, generous free tier
-        "gemini-2.0-flash-lite",             # lighter fallback
-        "gemini-1.5-flash",                  # reliable fallback
-        "gemini-1.5-pro",                    # high-quality last resort
+        os.environ.get("GEMINI_MODEL", ""),        # user-pinned model (highest priority)
+        "gemini-2.5-flash",                        # latest flash — best free-tier quota
+        "gemini-2.5-flash-lite-preview-06-17",     # lighter 2.5 fallback
+        "gemini-2.0-flash",                        # stable fallback
+        "gemini-2.0-flash-lite",                   # lightest fallback
     ] if m
 ]
 
