@@ -28,34 +28,13 @@ FUTURES_ENDPOINTS = [
 REFRESH_SECONDS = 20        # background analysis loop interval
 
 # ---- Binance API credentials (optional) ----
-# Set BINANCE_API_KEY and BINANCE_API_SECRET in your environment or .env file.
+# These are set at runtime by server.py after prompting the user in the
+# terminal.  Do NOT put keys in a .env file or hardcode them here.
 # Required for: account info, order placement, private endpoints.
 # Not required for: market data (klines, ticker, futures stats).
 # With an API key, public endpoints also benefit from higher rate limits.
-BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY", "")
-BINANCE_API_SECRET = os.environ.get("BINANCE_API_SECRET", "")
-
-
-def _load_env_file():
-    """Load BINANCE_API_KEY/SECRET from a local .env file if not already set."""
-    global BINANCE_API_KEY, BINANCE_API_SECRET
-    if BINANCE_API_KEY and BINANCE_API_SECRET:
-        return
-    base = os.path.dirname(__file__)
-    for name in (".env", ".env.local"):
-        try:
-            with open(os.path.join(base, name)) as fh:
-                for line in fh:
-                    line = line.strip()
-                    if line.startswith("BINANCE_API_KEY=") and not BINANCE_API_KEY:
-                        BINANCE_API_KEY = line.split("=", 1)[1].strip().strip('"').strip("'")
-                    elif line.startswith("BINANCE_API_SECRET=") and not BINANCE_API_SECRET:
-                        BINANCE_API_SECRET = line.split("=", 1)[1].strip().strip('"').strip("'")
-        except OSError:
-            continue
-
-
-_load_env_file()
+BINANCE_API_KEY = ""
+BINANCE_API_SECRET = ""
 
 # ---- Confluence engine ----
 # Weight of each strategy in the composite score (must not exceed 100 total).
@@ -79,8 +58,8 @@ ENGINE_SIGNAL_FEED = False  # False: dashboard feed shows AI trade calls only;
                             # engine signals are still computed and persisted internally
 
 # ---- OpenRouter AI analyst (discretionary structure/liquidity read) ----
-# Requires OPENROUTER_API_KEY in the environment or a local .env file.
-# Set OPENROUTER_MODEL to pin a specific model (overrides the priority list).
+# OPENROUTER_API_KEY is collected from the terminal at startup by server.py.
+# Set OPENROUTER_MODEL env var to pin a specific model (overrides priority list).
 AI_INTERVAL = "1h"          # primary chart the AI analyst monitors
 AI_HTF_INTERVAL = "4h"      # higher-timeframe chart used for top-down context
 AI_REFRESH_SECONDS = 60     # how often the AI re-analyzes each active symbol
@@ -98,8 +77,8 @@ AI_MAX_ENTRY_ATR_DISTANCE = 2.5  # reject entries this many ATRs from live price
 #
 # Setup:
 #   1. Get a free key at https://openrouter.ai
-#   2. Add to your .env file:  OPENROUTER_API_KEY=sk-or-v1-...
-#   3. Optionally pin a specific model:  OPENROUTER_MODEL=meta-llama/llama-3.3-70b-instruct:free
+#   2. Run python server.py — you will be prompted for the key in the terminal.
+#   3. Optionally set OPENROUTER_MODEL env var to pin a specific model.
 MODEL_RL_COOLDOWN = 90      # seconds to skip a rate-limited model before retrying
 
 # ---- Market regime (informational context only — not a gate) ----
