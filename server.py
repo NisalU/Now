@@ -323,24 +323,44 @@ async def _status_loop() -> None:
 
 
 async def _ai_loop() -> None:
-    """Run AI analyst for every subscribed symbol on a fixed cadence."""
+    """Run AI analyst one symbol per cycle, rotating through active symbols.
+
+    Analyzing all symbols at once burns through free-tier RPM quotas.
+    Instead we pick one symbol per cycle (round-robin), so N symbols cost
+    1 API call every AI_REFRESH_SECONDS seconds instead of N calls.
+    """
+    _symbol_queue: list[str] = []
+
     while True:
         try:
-            symbols = {c.symbol for c in manager.clients}
-            symbols.add(config.DEFAULT_SYMBOL)
-            for symbol in symbols:
-                result          = await asyncio.to_thread(ai_analyst.analyze_safe, symbol)
-                ai_payload      = {"type": "ai",             "data": result}
-                status_payload  = {"type": "engine_status",  "data": ai_analyst.get_status()}
-                signals_payload = {"type": "ai_signals_table", "data": ai_analyst.get_recent_signals()}
-                pipeline_payload = {"type": "pipeline_log",  "data": ai_analyst.get_pipeline_log()[:40]}
-                for c in manager.clients:
-                    if c.symbol == symbol:
-                        c.send(ai_payload)
-                        c.send(pipeline_payload)
-                    c.send(status_payload)
-                    c.send(signals_payload)
-                asyncio.create_task(_push_ai_charts(symbol, result))
+            # Build the current set of interesting symbols
+            active = list({c.symbol for c in manager.clients} | {config.DEFAULT_SYMBOL})
+
+            # Rotate: drop symbols no longer active, append new ones
+            _symbol_queue[:] = [s for s in _symbol_queue if s in active]
+            for s in active:
+                if s not in _symbol_queue:
+                    _symbol_queue.append(s)
+
+            # Pick one symbol this cycle
+            if _symbol_queue:
+                symbol = _symbol_queue.pop(0)
+                _symbol_queue.append(symbol)  # move to back for next cycle
+            else:
+                symbol = config.DEFAULT_SYMBOL
+
+            result           = await asyncio.to_thread(ai_analyst.analyze_safe, symbol)
+            ai_payload       = {"type": "ai",               "data": result}
+            status_payload   = {"type": "engine_status",    "data": ai_analyst.get_status()}
+            signals_payload  = {"type": "ai_signals_table", "data": ai_analyst.get_recent_signals()}
+            pipeline_payload = {"type": "pipeline_log",     "data": ai_analyst.get_pipeline_log()[:40]}
+            for c in manager.clients:
+                if c.symbol == symbol:
+                    c.send(ai_payload)
+                    c.send(pipeline_payload)
+                c.send(status_payload)
+                c.send(signals_payload)
+            asyncio.create_task(_push_ai_charts(symbol, result))
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001

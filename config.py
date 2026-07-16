@@ -60,7 +60,7 @@ ENGINE_SIGNAL_FEED = False  # False: dashboard feed shows AI trade calls only;
 # Set GEMINI_MODEL env var to pin a specific model (overrides priority list).
 AI_INTERVAL = "1h"          # primary chart the AI analyst monitors
 AI_HTF_INTERVAL = "4h"      # higher-timeframe chart used for top-down context
-AI_REFRESH_SECONDS = 60     # how often the AI re-analyzes each active symbol
+AI_REFRESH_SECONDS = 300    # how often the AI re-analyzes each active symbol
 
 # Server-side risk gate — arithmetic checks only (entry/stop/tp1 validity,
 # minimum R:R, entry-not-chasing). Market regime and trade quality are passed
@@ -72,7 +72,7 @@ AI_MAX_ENTRY_ATR_DISTANCE = 2.5  # reject entries this many ATRs from live price
 # Models tried in order: gemini-2.0-flash → gemini-2.0-flash-lite → gemini-1.5-flash → gemini-1.5-flash-8b
 # When a model returns 429 it is skipped for MODEL_RL_COOLDOWN seconds.
 # The last successful model is cached and tried first on the next run.
-MODEL_RL_COOLDOWN = 90      # seconds to skip a rate-limited model before retrying
+MODEL_RL_COOLDOWN = 180     # seconds to skip a rate-limited model before retrying
 
 # ---- Market regime (informational context only — not a gate) ----
 # These thresholds drive the regime classifier whose output is passed to the AI
