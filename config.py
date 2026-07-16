@@ -13,8 +13,6 @@ INTERVALS = ["1m", "5m", "15m", "1h", "4h", "1d"]
 KLINE_LIMIT = 300           # candles fetched per analysis
 
 # Binance REST endpoints, tried in order (first that works is cached).
-# data-api.binance.vision is Binance's public market-data mirror and
-# usually works even where api.binance.com is geo-restricted.
 SPOT_ENDPOINTS = [
     "https://api.binance.com",
     "https://api1.binance.com",
@@ -27,14 +25,11 @@ FUTURES_ENDPOINTS = [
 
 REFRESH_SECONDS = 20        # background analysis loop interval
 
-# ---- Binance API credentials (required) ----
-# These are set at runtime by server.py after prompting the user in the
-# terminal.  Do NOT put keys in a .env file or hardcode them here.
+# ---- Binance API credentials (optional) ----
 BINANCE_API_KEY = ""
 BINANCE_API_SECRET = ""
 
 # ---- Confluence engine ----
-# Weight of each strategy in the composite score (must not exceed 100 total).
 WEIGHTS = {
     "ema_trend": 12,
     "support_resistance": 12,
@@ -48,40 +43,48 @@ WEIGHTS = {
     "fundamentals": 6,
 }
 
-SIGNAL_THRESHOLD = 20       # |composite| >= threshold fires a LONG/SHORT signal
-STRONG_THRESHOLD = 45       # strong signal label
-MAX_SIGNAL_HISTORY = 200    # kept in memory / persisted to signals.json
-ENGINE_SIGNAL_FEED = False  # False: dashboard feed shows AI trade calls only;
-                            # engine signals are still computed and persisted internally
+SIGNAL_THRESHOLD = 20
+STRONG_THRESHOLD = 45
+MAX_SIGNAL_HISTORY = 200
+ENGINE_SIGNAL_FEED = False
 
-# ---- Google Gemini AI analyst (discretionary structure/liquidity read) ----
-# GEMINI_API_KEY is collected from the terminal at startup by server.py.
-# Get a free key at https://aistudio.google.com
-# Set GEMINI_MODEL env var to pin a specific model (overrides priority list).
-AI_INTERVAL = "1h"          # primary chart the AI analyst monitors
-AI_HTF_INTERVAL = "4h"      # higher-timeframe chart used for top-down context
-AI_REFRESH_SECONDS = 300    # how often the AI re-analyzes each active symbol
+# ---- AI analyst ----
+AI_INTERVAL = "1h"
+AI_HTF_INTERVAL = "4h"
+AI_REFRESH_SECONDS = 60         # re-analyze every 60 seconds
+AI_MIN_CALL_INTERVAL = 2.1      # min gap between Groq HTTP calls (rate-limit guard)
 
-# Server-side risk gate — arithmetic checks only (entry/stop/tp1 validity,
-# minimum R:R, entry-not-chasing). Market regime and trade quality are passed
-# to the AI as *context* but do NOT block or filter any signal.
-AI_MIN_RISK_REWARD = 1.2        # reject any LONG/SHORT below this R:R to TP1
-AI_MAX_ENTRY_ATR_DISTANCE = 2.5  # reject entries this many ATRs from live price (chase guard)
+# Server-side risk gate
+AI_MIN_RISK_REWARD = 1.2
+AI_MAX_ENTRY_ATR_DISTANCE = 2.5
 
-# ---- Gemini model priority list ----
-# Models tried in order: gemini-2.0-flash → gemini-2.0-flash-lite → gemini-1.5-flash → gemini-1.5-flash-8b
-# When a model returns 429 it is skipped for MODEL_RL_COOLDOWN seconds.
-# The last successful model is cached and tried first on the next run.
-MODEL_RL_COOLDOWN = 180     # seconds to skip a rate-limited model before retrying
+# Model rate-limit cooldown
+MODEL_RL_COOLDOWN = 60          # shorter cooldown so we can cycle faster
 
-# ---- Market regime (informational context only — not a gate) ----
-# These thresholds drive the regime classifier whose output is passed to the AI
-# as context. The regime no longer blocks any AI call.
-REGIME_COMPRESSION_TIGHT = 0.45
-REGIME_VOLATILITY_SPIKE = 1.8
-
-# ---- AI critic (second-pass review) ----
+# ---- AI critic — DISABLED ----
 AI_CRITIC_ENABLED = False
 
 # ---- Signal memory ----
-SIGNAL_MEMORY_LOOKBACK = 3  # past setups (same symbol) shown to the AI as context
+SIGNAL_MEMORY_LOOKBACK = 3
+
+# ---- Pipeline log ----
+PIPELINE_LOG_MAX = 100
+
+# ---- Active-signal lock ----
+# When a LONG/SHORT signal fires, AI analysis for that symbol is paused
+# until the signal is stopped out (price crosses stop) or target is hit (price >= tp1).
+ACTIVE_SIGNAL_LOCK = True
+
+# ---- Market regime ----
+REGIME_COMPRESSION_TIGHT = 0.45
+REGIME_VOLATILITY_SPIKE = 1.8
+
+# Token budgets
+AI_MAX_TOKENS = 2000
+AI_MAX_TOKENS_RETRY = 3000
+AI_JSON_FAIL_COOLDOWN = 30
+
+# Prompt sizing
+AI_PROMPT_CANDLES = 6
+AI_PROMPT_CVD_POINTS = 12
+AI_PROMPT_MEMORY_ROWS = 3

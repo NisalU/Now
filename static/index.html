@@ -11,6 +11,8 @@
   <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
+  <div class="scanlines" aria-hidden="true"></div>
+
   <header class="topbar">
     <div class="brand">
       <span class="dot" id="live-dot" aria-hidden="true"></span>
@@ -60,6 +62,13 @@
       </div>
     </section>
 
+    <!-- Active Signal Lock banner -->
+    <div class="signal-lock-banner hidden" id="signal-lock-banner">
+      <span class="signal-lock-icon">🔒</span>
+      <span class="signal-lock-text" id="signal-lock-text">Signal active — AI analysis paused until stop or target</span>
+      <span class="signal-lock-detail" id="signal-lock-detail"></span>
+    </div>
+
     <!-- Status row: AI Engine + Binance -->
     <div class="status-row">
       <section class="card engine-status-card" id="engine-status-card">
@@ -68,10 +77,9 @@
             <span class="es-dot" id="es-dot"></span>
             <span class="es-title">AI Engine <span id="es-status-label">Offline</span></span>
           </div>
-          <span class="es-version" id="es-version">v4.3</span>
+          <span class="es-version" id="es-version">v5.0</span>
         </div>
 
-        <!-- Provider + model name row -->
         <div class="es-model-row" id="es-model-row">
           <div class="es-provider-badge muted" id="es-provider-badge">—</div>
           <span class="es-model-name" id="es-model-name" title="">—</span>
@@ -93,6 +101,22 @@
           <div class="es-metric">
             <span class="es-metric-label">Total calls</span>
             <span class="es-metric-value" id="es-total">&mdash;</span>
+          </div>
+          <!-- AI Analysis Countdown -->
+          <div class="es-metric es-metric-countdown">
+            <span class="es-metric-label">Next analysis</span>
+            <div class="es-metric-right">
+              <span class="countdown-pill" id="es-next-analysis">—</span>
+              <div class="countdown-ring-wrap" id="countdown-ring-wrap">
+                <svg class="countdown-ring" viewBox="0 0 36 36" aria-hidden="true">
+                  <circle class="countdown-ring-bg" cx="18" cy="18" r="15.9" />
+                  <circle class="countdown-ring-fill" id="countdown-ring-fill"
+                          cx="18" cy="18" r="15.9"
+                          stroke-dasharray="100 100"
+                          stroke-dashoffset="0" />
+                </svg>
+              </div>
+            </div>
           </div>
         </div>
         <div class="es-waveform" aria-hidden="true">
@@ -128,7 +152,7 @@
       </section>
     </div>
 
-    <!-- API Pipeline card -->
+    <!-- API Pipeline card — 3 stages (Critic removed) -->
     <section class="card pipeline-card" id="pipeline-card">
       <div class="card-head">
         <h2>AI API Pipeline</h2>
@@ -138,7 +162,7 @@
         </div>
       </div>
 
-      <!-- Stage row — 4 stages: Data → Analyst → Critic → Out -->
+      <!-- 3-stage pipeline: Market Data → AI Analyst → Signal Out -->
       <div class="pipeline" id="pipeline" aria-label="AI API pipeline stages">
 
         <div class="pipe-stage" id="pipe-stage-0" data-stage="0">
@@ -174,29 +198,14 @@
             <div class="pipe-node-ring"></div>
             <div class="pipe-node-dot"></div>
           </div>
-          <div class="pipe-label">Critic Review</div>
-          <div class="pipe-sub" id="pipe-sub-2">idle</div>
-        </div>
-
-        <div class="pipe-connector" id="pipe-conn-2">
-          <div class="pipe-line"></div>
-          <div class="pipe-particle" id="pipe-particle-2"></div>
-        </div>
-
-        <div class="pipe-stage" id="pipe-stage-3" data-stage="3">
-          <div class="pipe-node">
-            <div class="pipe-node-ring"></div>
-            <div class="pipe-node-dot"></div>
-          </div>
           <div class="pipe-label">Signal Out</div>
-          <div class="pipe-sub" id="pipe-sub-3">—</div>
+          <div class="pipe-sub" id="pipe-sub-2">—</div>
         </div>
 
       </div>
 
       <!-- Live AI analysis detail panel -->
       <div class="pipe-detail-panel" id="pipe-detail-panel">
-        <!-- Analyst detail -->
         <div class="pipe-detail-block" id="pipe-detail-analyst">
           <div class="pipe-detail-row">
             <span class="pipe-detail-key">Model</span>
@@ -220,17 +229,28 @@
           </div>
         </div>
 
-        <!-- Critic detail -->
-        <div class="pipe-detail-block pipe-detail-critic" id="pipe-detail-critic">
-          <div class="pipe-critic-verdict" id="pd-critic-verdict">
-            <span class="pipe-critic-icon" id="pd-critic-icon">?</span>
-            <span class="pipe-critic-label" id="pd-critic-label">Waiting for critic…</span>
+        <!-- Signal out detail -->
+        <div class="pipe-detail-block pipe-detail-signal-out" id="pipe-detail-signal-out">
+          <div class="pipe-signal-out-verdict" id="pd-signal-out-verdict">
+            <span class="pipe-signal-out-icon" id="pd-signal-out-icon">◎</span>
+            <span class="pipe-signal-out-label" id="pd-signal-out-label">Waiting for signal…</span>
           </div>
-          <div class="pipe-detail-row pipe-detail-reasoning-row" id="pd-critique-row" style="display:none">
-            <span class="pipe-detail-key">Critique</span>
-            <span class="pipe-detail-val pipe-detail-reasoning" id="pd-critique">—</span>
+          <div class="pipe-detail-row" id="pd-entry-row" style="display:none">
+            <span class="pipe-detail-key">Entry</span>
+            <span class="pipe-detail-val" id="pd-entry">—</span>
           </div>
-          <div class="pipe-concerns" id="pd-concerns"></div>
+          <div class="pipe-detail-row" id="pd-stop-row" style="display:none">
+            <span class="pipe-detail-key">Stop</span>
+            <span class="pipe-detail-val" id="pd-stop">—</span>
+          </div>
+          <div class="pipe-detail-row" id="pd-tp-row" style="display:none">
+            <span class="pipe-detail-key">TP 1 / 2</span>
+            <span class="pipe-detail-val" id="pd-tp">—</span>
+          </div>
+          <div class="pipe-detail-row" id="pd-rr-row" style="display:none">
+            <span class="pipe-detail-key">R:R</span>
+            <span class="pipe-detail-val" id="pd-rr">—</span>
+          </div>
         </div>
       </div>
 
@@ -239,7 +259,7 @@
         <div class="pipe-log-empty">No calls yet &mdash; log appears when the AI pipeline runs&hellip;</div>
       </div>
 
-      <!-- Live pipeline events — per-stage backend event stream -->
+      <!-- Live pipeline events -->
       <div class="pipe-events-panel">
         <div class="pipe-events-header">
           <span class="pipe-events-title">Live Processing Events</span>
@@ -288,11 +308,11 @@
         <span class="ai-signal-badge hidden" id="ai-chart-badge"></span>
       </div>
       <div class="ai-chart-row" id="ai-chart-row" style="display:none">
-        <div class="ai-chart-col">
+        <div class="ai-chart-col" id="ai-chart-15m-col">
           <div class="ai-chart-label">15m &middot; Entry Zones</div>
           <div id="ai-chart-15m" class="ai-chart-canvas"></div>
         </div>
-        <div class="ai-chart-col">
+        <div class="ai-chart-col" id="ai-chart-1h-col">
           <div class="ai-chart-label">1h &middot; Structure</div>
           <div id="ai-chart-1h" class="ai-chart-canvas"></div>
         </div>

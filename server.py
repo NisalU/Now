@@ -1,13 +1,9 @@
 """AI Trading Signal Bot — aiohttp + WebSocket server.
 
-Run on Termux or any local machine:
+Run on any local Linux/Mac machine:
     pip install -r requirements.txt
     python server.py
-You will be prompted for your API keys in the terminal.
 Then open http://<local-ip>:8000 from any device on the same network.
-
-The dashboard talks to /ws for realtime ticks, moving candles, analysis
-snapshots and signal events. REST endpoints are kept as a fallback.
 """
 import asyncio
 import contextlib
@@ -23,16 +19,10 @@ from aiohttp import WSMsgType, web
 
 BASE_DIR = Path(__file__).parent
 
-# ---------------------------------------------------------------------------
-# These module-level names are populated by _load_app_modules() inside
-# __main__, AFTER API keys have been collected from the terminal.
-# All route handlers reference them by name at call time, so deferred
-# assignment is safe.
-# ---------------------------------------------------------------------------
-config = None       # type: ignore[assignment]
-ai_analyst = None   # type: ignore[assignment]
-engine = None       # type: ignore[assignment]
-manager = None      # type: ignore[assignment]
+config     = None  # type: ignore[assignment]
+ai_analyst = None  # type: ignore[assignment]
+engine     = None  # type: ignore[assignment]
+manager    = None  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------
@@ -40,11 +30,6 @@ manager = None      # type: ignore[assignment]
 # ---------------------------------------------------------------------------
 
 def _prompt_for_keys() -> None:
-    """Interactively collect API keys from the terminal.
-
-    Input is hidden (getpass) so keys never appear on screen.
-    All keys are optional — the app degrades gracefully when they are absent.
-    """
     print()
     print("=" * 56)
     print("  AI Trading Signal Bot — API Key Setup")
@@ -52,36 +37,30 @@ def _prompt_for_keys() -> None:
     print("=" * 56)
     print()
 
-    # ---- Google Gemini ----
-    print("  Google Gemini API key is required for the AI analyst.")
-    print("  Get a free key at https://aistudio.google.com")
+    print("  Groq API key is required for the AI analyst.")
+    print("  Get a free key at https://console.groq.com/keys")
     print("  Press Enter to skip (AI analyst will be disabled).")
-    gemini_key = getpass.getpass("  Gemini API key: ").strip()
-    if gemini_key:
-        os.environ["GEMINI_API_KEY"] = gemini_key
-        print("  [ok] Gemini API key set.")
+    groq_key = getpass.getpass("  Groq API key: ").strip()
+    if groq_key:
+        os.environ["GROQ_API_KEY"] = groq_key
+        print("  [ok] Groq API key set.")
     else:
-        print("  [skip] No Gemini key — AI analyst disabled.")
+        print("  [skip] No Groq key — AI analyst disabled.")
 
     print()
 
-    # ---- Binance ----
-    print("  Binance API credentials are REQUIRED.")
-    while True:
-        binance_key = getpass.getpass("  Binance API key: ").strip()
-        if binance_key:
-            break
-        print("  [error] Binance API key cannot be empty. Please enter your key.")
-    os.environ["BINANCE_API_KEY"] = binance_key
-    print("  [ok] Binance API key set.")
-
-    while True:
+    print("  Binance API credentials (optional — for authenticated endpoints).")
+    binance_key = getpass.getpass("  Binance API key (Enter to skip): ").strip()
+    if binance_key:
+        os.environ["BINANCE_API_KEY"] = binance_key
         binance_secret = getpass.getpass("  Binance API secret: ").strip()
         if binance_secret:
-            break
-        print("  [error] Binance API secret cannot be empty. Please enter your secret.")
-    os.environ["BINANCE_API_SECRET"] = binance_secret
-    print("  [ok] Binance API secret set.")
+            os.environ["BINANCE_API_SECRET"] = binance_secret
+            print("  [ok] Binance credentials set.")
+        else:
+            print("  [skip] No secret — skipping Binance auth.")
+    else:
+        print("  [skip] No Binance key — public market data only.")
 
     print()
     print("=" * 56)
@@ -89,11 +68,6 @@ def _prompt_for_keys() -> None:
 
 
 def _load_app_modules() -> None:
-    """Import app modules after os.environ has been populated.
-
-    This ensures ai_analyst.enabled is set correctly (it reads the
-    Gemini key at class instantiation time).
-    """
     global config, ai_analyst, engine, manager
 
     import config as _config
@@ -101,8 +75,6 @@ def _load_app_modules() -> None:
     from engine import engine as _engine
     from stream import manager as _manager
 
-    # Patch Binance credentials into the already-imported config object so
-    # that any code reading config.BINANCE_API_KEY gets the user's input.
     _config.BINANCE_API_KEY    = os.environ.get("BINANCE_API_KEY", "")
     _config.BINANCE_API_SECRET = os.environ.get("BINANCE_API_SECRET", "")
 
@@ -113,7 +85,7 @@ def _load_app_modules() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Static file
+# Static / index
 # ---------------------------------------------------------------------------
 
 async def index(_request: web.Request) -> web.StreamResponse:
@@ -121,17 +93,18 @@ async def index(_request: web.Request) -> web.StreamResponse:
 
 
 # ---------------------------------------------------------------------------
-# REST fallback
+# REST endpoints
 # ---------------------------------------------------------------------------
 
 async def api_config(_request: web.Request) -> web.Response:
     return web.json_response({
-        "symbols":         config.SYMBOLS,
-        "intervals":       config.INTERVALS,
-        "default_symbol":  config.DEFAULT_SYMBOL,
+        "symbols":          config.SYMBOLS,
+        "intervals":        config.INTERVALS,
+        "default_symbol":   config.DEFAULT_SYMBOL,
         "default_interval": config.DEFAULT_INTERVAL,
-        "threshold":       config.SIGNAL_THRESHOLD,
-        "refresh_seconds": config.REFRESH_SECONDS,
+        "threshold":        config.SIGNAL_THRESHOLD,
+        "refresh_seconds":  config.REFRESH_SECONDS,
+        "ai_refresh_seconds": config.AI_REFRESH_SECONDS,
     })
 
 
@@ -143,7 +116,7 @@ async def api_state(request: web.Request) -> web.Response:
     try:
         data = await asyncio.to_thread(engine.get_state, symbol, interval)
         return web.json_response(data)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return web.json_response({"error": str(e)}, status=502)
 
 
@@ -156,7 +129,7 @@ async def api_ai(request: web.Request) -> web.Response:
     if symbol not in config.SYMBOLS:
         return web.json_response({"error": "invalid symbol"}, status=400)
     if not ai_analyst.enabled:
-        return web.json_response({"error": "GEMINI_API_KEY not set"}, status=503)
+        return web.json_response({"error": "GROQ_API_KEY not set"}, status=503)
     cached = ai_analyst.get_cached(symbol)
     if cached:
         return web.json_response(cached)
@@ -165,17 +138,14 @@ async def api_ai(request: web.Request) -> web.Response:
 
 
 async def api_engine_status(_request: web.Request) -> web.Response:
-    """AI engine metrics for the status widget."""
     return web.json_response(ai_analyst.get_status())
 
 
 async def api_ai_signals(_request: web.Request) -> web.Response:
-    """Recent AI LONG/SHORT signals for the signals table."""
     return web.json_response(ai_analyst.get_recent_signals())
 
 
 async def api_binance_key_status(_request: web.Request) -> web.Response:
-    """Returns whether Binance API credentials are configured (never reveals keys)."""
     return web.json_response({
         "api_key_configured":    bool(config.BINANCE_API_KEY),
         "api_secret_configured": bool(config.BINANCE_API_SECRET),
@@ -183,28 +153,30 @@ async def api_binance_key_status(_request: web.Request) -> web.Response:
 
 
 async def api_pipeline_events(_request: web.Request) -> web.Response:
-    """Return recent AI pipeline events for the live-processing view.
-
-    Each event is a dict with:
-      ts        – Unix timestamp (float, seconds)
-      run_id    – "<symbol>:<epoch>" identifying a single pipeline run
-      stage     – stage name: market_data, memory_context, ai_call,
-                  model_attempt, model_rate_limited, model_success,
-                  model_error, provider_fallback, provider_recovered,
-                  ai_parsed, trade_quality, critic, signal_out, …
-      + stage-specific fields (symbol, model, provider, latency_ms, …)
-
-    Events are newest-first.  Clients should poll every ~5 s or receive
-    events via the WebSocket ``pipeline_log`` push after each AI run.
-    """
     return web.json_response({
         "events":     ai_analyst.get_pipeline_log(),
         "active_run": ai_analyst.get_active_run(),
     })
 
 
+async def api_signal_status(request: web.Request) -> web.Response:
+    """Active-signal lock status for each symbol."""
+    symbol = request.query.get("symbol")
+    status = ai_analyst.get_status()
+    if symbol:
+        return web.json_response({
+            "symbol":        symbol,
+            "active_signal": status["active_signals"].get(symbol),
+            "next_analysis": status["next_analysis_ts"].get(symbol),
+        })
+    return web.json_response({
+        "active_signals":   status["active_signals"],
+        "next_analysis_ts": status["next_analysis_ts"],
+    })
+
+
 # ---------------------------------------------------------------------------
-# Realtime WebSocket
+# WebSocket
 # ---------------------------------------------------------------------------
 
 async def ws_endpoint(request: web.Request) -> web.WebSocketResponse:
@@ -214,8 +186,6 @@ async def ws_endpoint(request: web.Request) -> web.WebSocketResponse:
     client = Client(ws)
 
     async def sender():
-        """Drain the client queue and write to the WebSocket.
-        Exits cleanly on cancellation or any send error (closed socket, etc.)."""
         try:
             while True:
                 msg = await client.queue.get()
@@ -228,14 +198,15 @@ async def ws_endpoint(request: web.Request) -> web.WebSocketResponse:
 
     send_task = asyncio.create_task(sender())
     try:
-        # hello: config + signal history
+        # ── Hello burst ──────────────────────────────────────────────────
         client.send({
-            "type":             "config",
-            "symbols":          config.SYMBOLS,
-            "intervals":        config.INTERVALS,
-            "default_symbol":   config.DEFAULT_SYMBOL,
-            "default_interval": config.DEFAULT_INTERVAL,
-            "threshold":        config.SIGNAL_THRESHOLD,
+            "type":               "config",
+            "symbols":            config.SYMBOLS,
+            "intervals":          config.INTERVALS,
+            "default_symbol":     config.DEFAULT_SYMBOL,
+            "default_interval":   config.DEFAULT_INTERVAL,
+            "threshold":          config.SIGNAL_THRESHOLD,
+            "ai_refresh_seconds": config.AI_REFRESH_SECONDS,
         })
         if config.ENGINE_SIGNAL_FEED:
             client.send({"type": "signals", "data": list(reversed(engine.signals[-50:]))})
@@ -246,6 +217,8 @@ async def ws_endpoint(request: web.Request) -> web.WebSocketResponse:
             client.send({"type": "engine_status",    "data": ai_analyst.get_status()})
             client.send({"type": "ai_signals_table", "data": ai_analyst.get_recent_signals()})
             client.send({"type": "pipeline_log",     "data": ai_analyst.get_pipeline_log()[:40]})
+            # Send countdown for default symbol
+            _push_countdown(client, client.symbol)
         manager.add_client(client)
 
         async def push_snapshot(symbol, interval):
@@ -253,7 +226,7 @@ async def ws_endpoint(request: web.Request) -> web.WebSocketResponse:
                 data = await asyncio.to_thread(engine.get_state, symbol, interval)
                 if client.market() == (symbol, interval):
                     client.send({"type": "snapshot", "data": data})
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 client.send({"type": "error", "message": str(e)})
 
         asyncio.create_task(push_snapshot(client.symbol, client.interval))
@@ -268,13 +241,29 @@ async def ws_endpoint(request: web.Request) -> web.WebSocketResponse:
             except (json.JSONDecodeError, TypeError):
                 continue
             kind = msg.get("type")
+
             if kind == "subscribe":
                 sym = msg.get("symbol", config.DEFAULT_SYMBOL)
                 ivl = msg.get("interval", config.DEFAULT_INTERVAL)
                 if sym in config.SYMBOLS and ivl in config.INTERVALS:
+                    old_sym = client.symbol
                     client.symbol   = sym
                     client.interval = ivl
                     asyncio.create_task(push_snapshot(sym, ivl))
+                    # Push cached AI immediately so dashboard updates without wait
+                    if ai_analyst.enabled:
+                        cached_ai = ai_analyst.get_cached(sym)
+                        if cached_ai:
+                            client.send({"type": "ai", "data": cached_ai})
+                        _push_countdown(client, sym)
+                        client.send({"type": "engine_status",    "data": ai_analyst.get_status()})
+                        client.send({"type": "ai_signals_table", "data": ai_analyst.get_recent_signals()})
+                        client.send({"type": "pipeline_log",     "data": ai_analyst.get_pipeline_log()[:40]})
+
+            elif kind == "ping":
+                # Application-level ping → pong with echo timestamp
+                client.send({"type": "pong", "t": msg.get("t", 0)})
+
     finally:
         send_task.cancel()
         manager.remove_client(client)
@@ -286,23 +275,33 @@ async def ws_endpoint(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
+def _push_countdown(client, symbol):
+    """Push next-analysis countdown for `symbol` to a single client."""
+    next_ts = ai_analyst.get_next_analysis_ts(symbol)
+    if next_ts:
+        client.send({
+            "type":        "ai_countdown",
+            "symbol":      symbol,
+            "next_ts":     next_ts,
+            "interval_s":  config.AI_REFRESH_SECONDS,
+        })
+
+
 # ---------------------------------------------------------------------------
 # Background loops
 # ---------------------------------------------------------------------------
 
 async def _push_ai_charts(symbol: str, result: dict) -> None:
-    """Push 15m and 1h chart snapshots to all clients subscribed to *symbol*
-    when an AI signal fires, so the chart updates immediately."""
     if not (result or {}).get("signal"):
         return
     for ivl in (config.AI_INTERVAL, config.AI_HTF_INTERVAL):
         try:
-            data = await asyncio.to_thread(engine.get_state, symbol, ivl)
+            data    = await asyncio.to_thread(engine.get_state, symbol, ivl)
             payload = {"type": "snapshot", "data": data}
             for c in manager.clients:
                 if c.symbol == symbol and c.interval == ivl:
                     c.send(payload)
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
 
@@ -317,73 +316,96 @@ async def _status_loop() -> None:
                 c.send(signals_payload)
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001
+        except Exception:
             traceback.print_exc()
         await asyncio.sleep(10)
 
 
 async def _ai_loop() -> None:
-    """Run AI analyst one symbol per cycle, rotating through active symbols.
+    """Run AI analyst for each active symbol, every AI_REFRESH_SECONDS.
 
-    Uses exponential backoff when all Gemini models are rate-limited so the
-    bot stops hammering a quota that is exhausted for the day.
-
-    Backoff schedule (consecutive all-fail cycles):
-      1st fail  →  wait 5 min  (normal cadence, might be transient)
-      2nd fail  →  wait 10 min
-      3rd fail  →  wait 20 min
-      4th+ fail →  wait 30 min (cap — retry once every half hour)
+    - Skips analysis when an active signal is live (price hasn't hit stop/target).
+    - Broadcasts countdown so the dashboard can show a live timer.
+    - Uses exponential backoff when all models are rate-limited.
     """
     _symbol_queue: list[str] = []
     _consecutive_failures = 0
-    _BACKOFF = [300, 600, 1200, 1800]  # seconds per failure count
+    _BACKOFF = [300, 600, 1200, 1800]
 
     while True:
         try:
-            # Build the current set of interesting symbols
             active = list({c.symbol for c in manager.clients} | {config.DEFAULT_SYMBOL})
-
-            # Rotate: drop symbols no longer active, append new ones
             _symbol_queue[:] = [s for s in _symbol_queue if s in active]
             for s in active:
                 if s not in _symbol_queue:
                     _symbol_queue.append(s)
 
             symbol = _symbol_queue.pop(0) if _symbol_queue else config.DEFAULT_SYMBOL
-            if _symbol_queue is not None and symbol not in _symbol_queue:
+            if symbol not in _symbol_queue:
                 _symbol_queue.append(symbol)
+
+            # Set next-analysis timestamp and broadcast countdown BEFORE running
+            import time as _t; next_ts = int(_t.time() + config.AI_REFRESH_SECONDS)
+            ai_analyst.set_next_analysis_ts(symbol, next_ts)
+            countdown_payload = {
+                "type":       "ai_countdown",
+                "symbol":     symbol,
+                "next_ts":    next_ts,
+                "interval_s": config.AI_REFRESH_SECONDS,
+            }
+            for c in manager.clients:
+                c.send(countdown_payload)
 
             result = await asyncio.to_thread(ai_analyst.analyze_safe, symbol)
 
-            # Detect all-rate-limited outcome vs real success
             if result.get("error", "").startswith("RATE_LIMIT:"):
                 _consecutive_failures += 1
                 backoff = _BACKOFF[min(_consecutive_failures - 1, len(_BACKOFF) - 1)]
                 print(
-                    f"[ai] All Gemini models rate-limited (failure #{_consecutive_failures}). "
-                    f"Quota may be exhausted — backing off {backoff // 60} min before next attempt."
+                    f"[ai] All models rate-limited (failure #{_consecutive_failures}). "
+                    f"Backing off {backoff // 60} min."
                 )
+                # Update next-ts for extended backoff
+                backoff_next = int(__import__("time").time() + backoff)
+                ai_analyst.set_next_analysis_ts(symbol, backoff_next)
+                backoff_payload = {
+                    "type":       "ai_countdown",
+                    "symbol":     symbol,
+                    "next_ts":    backoff_next,
+                    "interval_s": backoff,
+                    "rate_limited": True,
+                }
+                for c in manager.clients:
+                    c.send(backoff_payload)
                 await asyncio.sleep(backoff)
                 continue
             else:
-                _consecutive_failures = 0  # reset on success
+                _consecutive_failures = 0
 
+            # Broadcast results
             ai_payload       = {"type": "ai",               "data": result}
             status_payload   = {"type": "engine_status",    "data": ai_analyst.get_status()}
             signals_payload  = {"type": "ai_signals_table", "data": ai_analyst.get_recent_signals()}
             pipeline_payload = {"type": "pipeline_log",     "data": ai_analyst.get_pipeline_log()[:40]}
+
             for c in manager.clients:
                 if c.symbol == symbol:
                     c.send(ai_payload)
                     c.send(pipeline_payload)
                 c.send(status_payload)
                 c.send(signals_payload)
+
             asyncio.create_task(_push_ai_charts(symbol, result))
+
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001
+        except Exception:
             traceback.print_exc()
+
         await asyncio.sleep(config.AI_REFRESH_SECONDS)
+
+
+import time as _time_mod  # noqa: E402 (used in _ai_loop)
 
 
 # ---------------------------------------------------------------------------
@@ -395,13 +417,13 @@ async def on_startup(app: web.Application) -> None:
     if ai_analyst.enabled:
         app["ai_task"]     = asyncio.create_task(_ai_loop())
         app["status_task"] = asyncio.create_task(_status_loop())
-        print("[ai] Google Gemini AI analyst enabled — auto model cycling active")
+        print("[ai] Groq AI analyst enabled — 1-min refresh cycle active")
     else:
-        print("[ai] No Gemini key — AI analysis disabled")
+        print("[ai] No Groq key — AI analysis disabled")
     if config.BINANCE_API_KEY:
-        print("[binance] API key configured — authenticated endpoints available")
+        print("[binance] API key configured")
     else:
-        print("[binance] No API key — market data only (public endpoints)")
+        print("[binance] No API key — public endpoints only")
 
 
 async def on_cleanup(app: web.Application) -> None:
@@ -416,16 +438,17 @@ async def on_cleanup(app: web.Application) -> None:
 
 def create_app() -> web.Application:
     app = web.Application()
-    app.router.add_get("/",                     index)
-    app.router.add_get("/api/config",           api_config)
-    app.router.add_get("/api/state",            api_state)
-    app.router.add_get("/api/signals",          api_signals)
-    app.router.add_get("/api/ai",               api_ai)
-    app.router.add_get("/api/engine-status",    api_engine_status)
-    app.router.add_get("/api/ai-signals",       api_ai_signals)
+    app.router.add_get("/",                       index)
+    app.router.add_get("/api/config",             api_config)
+    app.router.add_get("/api/state",              api_state)
+    app.router.add_get("/api/signals",            api_signals)
+    app.router.add_get("/api/ai",                 api_ai)
+    app.router.add_get("/api/engine-status",      api_engine_status)
+    app.router.add_get("/api/ai-signals",         api_ai_signals)
     app.router.add_get("/api/binance-key-status", api_binance_key_status)
-    app.router.add_get("/api/pipeline-events",  api_pipeline_events)
-    app.router.add_get("/ws",                   ws_endpoint)
+    app.router.add_get("/api/pipeline-events",    api_pipeline_events)
+    app.router.add_get("/api/signal-status",      api_signal_status)
+    app.router.add_get("/ws",                     ws_endpoint)
     app.router.add_static("/static", BASE_DIR / "static", name="static")
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
@@ -439,28 +462,19 @@ def _local_ip() -> str:
         ip = s.getsockname()[0]
         s.close()
         return ip
-    except Exception:  # noqa: BLE001
+    except Exception:
         return "127.0.0.1"
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
 if __name__ == "__main__":
-    # 1. Prompt for keys BEFORE importing app modules.
-    #    ai_analyst reads GEMINI_API_KEY at class instantiation, so env
-    #    must be set first.
     _prompt_for_keys()
-
-    # 2. Import app modules now that os.environ is populated.
     _load_app_modules()
 
-    # 3. Start the server.
     print("=" * 56)
     print("  AI Trading Signal Bot  (aiohttp + WebSocket)")
     print(f"  Local:   http://127.0.0.1:{config.PORT}")
     print(f"  Network: http://{_local_ip()}:{config.PORT}")
+    print(f"  AI refresh: every {config.AI_REFRESH_SECONDS}s")
     print("=" * 56)
     web.run_app(
         create_app(),
