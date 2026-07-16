@@ -17,6 +17,10 @@
       <h1>SIGNAL<span>BOT</span></h1>
       <span class="latency" id="latency" title="WebSocket round-trip latency"></span>
     </div>
+    <div class="topbar-live">
+      <span class="live-pill" id="tick-rate" title="Live trade rate">— t/m</span>
+      <span class="live-pill clock" id="live-clock"></span>
+    </div>
     <div class="controls">
       <label class="sr-only" for="symbol">Symbol</label>
       <select id="symbol"></select>
@@ -26,6 +30,7 @@
   </header>
 
   <main class="layout">
+
     <!-- Verdict banner -->
     <section class="card verdict" id="verdict-card" aria-live="polite">
       <div class="verdict-left">
@@ -33,19 +38,30 @@
           <span class="big-price" id="price">&mdash;</span>
           <span class="chg" id="chg"></span>
         </div>
+        <!-- Buy/sell pressure bar -->
+        <div class="pressure-wrap" title="Buy vs sell volume pressure">
+          <div class="pressure-bar">
+            <div class="pressure-buy" id="pressure-buy" style="width:50%"></div>
+          </div>
+          <span class="pressure-labels">
+            <span class="buy-lbl" id="buy-pct">50%</span>
+            <span class="pressure-mid">pressure</span>
+            <span class="sell-lbl" id="sell-pct">50%</span>
+          </span>
+        </div>
         <div class="tape" id="tape" aria-hidden="true"></div>
         <div class="verdict-badge neutral" id="verdict">CONNECTING&hellip;</div>
       </div>
       <div class="gauge-wrap">
         <div class="gauge-labels"><span>SHORT</span><span>NEUTRAL</span><span>LONG</span></div>
         <div class="gauge"><div class="gauge-needle" id="gauge-needle"></div></div>
-        <div class="gauge-score" id="gauge-score">0</div>
+        <div class="gauge-score" id="gauge-score">—</div>
+        <div class="candle-countdown" id="candle-countdown"></div>
       </div>
     </section>
 
-    <!-- Two-column: AI Engine Status + Binance Key Status -->
+    <!-- Status row: AI Engine + Binance -->
     <div class="status-row">
-      <!-- AI Engine Status widget -->
       <section class="card engine-status-card" id="engine-status-card">
         <div class="es-header">
           <div class="es-title-row">
@@ -73,7 +89,6 @@
         </div>
       </section>
 
-      <!-- Binance connection status -->
       <section class="card binance-status-card" id="binance-status-card">
         <div class="es-header">
           <div class="es-title-row">
@@ -113,7 +128,7 @@
       </div>
     </section>
 
-    <!-- Price chart -->
+    <!-- Live price chart -->
     <section class="card">
       <div class="card-head">
         <h2>Live Price · EMA 7/25/99 · S/R · Fib · SMC</h2>
@@ -132,6 +147,27 @@
       <div id="cvd-chart" class="chart-cvd" role="img" aria-label="Cumulative volume delta chart"></div>
     </section>
 
+    <!-- AI Predict Limit Signal Charts (15m + 1h) -->
+    <section class="card" id="ai-chart-card">
+      <div class="card-head">
+        <h2>AI Limit Signal Preview</h2>
+        <span class="ai-signal-badge hidden" id="ai-chart-badge"></span>
+      </div>
+      <div class="ai-chart-row" id="ai-chart-row" style="display:none">
+        <div class="ai-chart-col">
+          <div class="ai-chart-label">15m &middot; Entry Zones</div>
+          <div id="ai-chart-15m" class="ai-chart-canvas"></div>
+        </div>
+        <div class="ai-chart-col">
+          <div class="ai-chart-label">1h &middot; Structure</div>
+          <div id="ai-chart-1h" class="ai-chart-canvas"></div>
+        </div>
+      </div>
+      <div class="ai-chart-empty" id="ai-chart-empty">
+        Waiting for AI signal &mdash; charts appear when a LONG or SHORT is called&hellip;
+      </div>
+    </section>
+
     <!-- Confluence breakdown -->
     <section class="card">
       <div class="card-head"><h2>Confluence Breakdown</h2></div>
@@ -139,7 +175,7 @@
     </section>
 
     <!-- Fundamentals -->
-    <section class="card" id="fund-card">
+    <section class="card hidden" id="fund-card">
       <div class="card-head"><h2>Fundamentals</h2></div>
       <div class="plan-grid" id="fundamentals">
         <div><span class="k">Funding</span><span class="v" id="f-funding">&mdash;</span></div>
@@ -178,10 +214,12 @@
       </div>
     </section>
 
-    <!-- AI trade calls (detail feed) -->
+    <!-- AI trade calls feed -->
     <section class="card">
-      <div class="card-head"><h2>AI Trade Calls (1h)</h2></div>
-      <div id="signals" class="signals"><p class="empty">No trade call yet &mdash; the AI analyst is watching the 1h chart for an A+ setup.</p></div>
+      <div class="card-head"><h2>AI Trade Calls</h2></div>
+      <div id="signals" class="signals">
+        <p class="empty">No trade call yet &mdash; the AI analyst is watching for an A+ setup.</p>
+      </div>
     </section>
 
     <footer class="disclaimer">
@@ -191,7 +229,6 @@
   </main>
 
   <div id="toasts" class="toasts" aria-live="polite"></div>
-
   <script src="/static/app.js"></script>
 </body>
 </html>

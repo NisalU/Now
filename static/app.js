@@ -1,29 +1,103 @@
-/* Signal Bot dashboard — WebSocket edition.
-   Improvements:
-   - Symbol/interval change shows immediate loading state, clears all stale data
-   - AI Engine Status widget with live waveform
-   - Recent AI Signals table with relative time, confidence bars, symbol filter, clickable rows */
+/* Signal Bot dashboard — realtime WebSocket + AI limit-signal charts.
+   Key improvements:
+   - localStorage symbol/interval persistence (survives page refresh)
+   - 15m + 1h AI predict-limit-signal mini-charts
+   - Buy/sell pressure bar, tick-rate counter, candle countdown
+   - Data-flash pulses on all live-updating elements
+   - Skeleton loading on symbol switch */
 (function () {
   "use strict";
 
+  /* ── palette ─────────────────────────────────────────────────────────────── */
   var C = {
     bg: "#131a22", grid: "#1f2a37", text: "#8b98a5",
     green: "#22c55e", red: "#ef4444", amber: "#f59e0b",
     ema7: "#eab308", ema25: "#38bdf8", ema99: "#a3a3a3",
   };
 
-  var symbolEl  = document.getElementById("symbol");
+  /* ── element refs ─────────────────────────────────────────────────────────── */
+  var symbolEl   = document.getElementById("symbol");
   var intervalEl = document.getElementById("interval");
-  var liveDot   = document.getElementById("live-dot");
-  var latencyEl = document.getElementById("latency");
-  var priceEl   = document.getElementById("price");
-  var tapeEl    = document.getElementById("tape");
-  var toastsEl  = document.getElementById("toasts");
+  var liveDot    = document.getElementById("live-dot");
+  var latencyEl  = document.getElementById("latency");
+  var priceEl    = document.getElementById("price");
+  var tapeEl     = document.getElementById("tape");
+  var toastsEl   = document.getElementById("toasts");
+  var tickRateEl = document.getElementById("tick-rate");
+  var clockEl    = document.getElementById("live-clock");
 
-  // ── charts ──────────────────────────────────────────────────────────────────
-  function baseOptions(el) {
-    return {
-      width: el.clientWidth,
+  /* ── localStorage keys ───────────────────────────────────────────────────── */
+  var LS_SYM = "sb_symbol";
+  var LS_INT = "sb_interval";
+
+  /* ── live clock ──────────────────────────────────────────────────────────── */
+  function updateClock() {
+    if (clockEl) {
+      clockEl.textContent = new Date().toLocaleTimeString("en-US", { hour12: false });
+    }
+  }
+  updateClock();
+  setInterval(updateClock, 1000);
+
+  /* ── tick-rate counter ───────────────────────────────────────────────────── */
+  var _tickCount = 0;
+  setInterval(function () {
+    if (tickRateEl) {
+      var rate = Math.round(_tickCount * 6); // per 10s → per min
+      tickRateEl.textContent = rate + " t/m";
+      _tickCount = 0;
+    }
+  }, 10000);
+
+  /* ── buy/sell pressure ───────────────────────────────────────────────────── */
+  var _buyVol = 0, _sellVol = 0;
+  var pressureBuy  = document.getElementById("pressure-buy");
+  var buyPctEl     = document.getElementById("buy-pct");
+  var sellPctEl    = document.getElementById("sell-pct");
+
+  function updatePressure() {
+    var total = _buyVol + _sellVol;
+    if (!total) return;
+    var buyPct = Math.round((_buyVol / total) * 100);
+    if (pressureBuy) pressureBuy.style.width = buyPct + "%";
+    if (buyPctEl)  buyPctEl.textContent  = buyPct + "%";
+    if (sellPctEl) sellPctEl.textContent = (100 - buyPct) + "%";
+  }
+
+  // Reset pressure window every 60 s
+  setInterval(function () { _buyVol = 0; _sellVol = 0; }, 60000);
+
+  /* ── candle countdown ────────────────────────────────────────────────────── */
+  var _intervalMs = 3600000; // default 1h
+  var _lastCandleTime = 0;
+  var countdownEl = document.getElementById("candle-countdown");
+
+  var INTERVAL_MS = { "1m": 60e3, "3m": 180e3, "5m": 300e3, "15m": 900e3,
+                      "30m": 1800e3, "1h": 3600e3, "4h": 14400e3, "1d": 86400e3 };
+
+  function updateCountdown() {
+    if (!countdownEl || !_lastCandleTime) return;
+    var next = (_lastCandleTime + 1) * 1000 + _intervalMs;
+    var rem  = Math.max(0, next - Date.now());
+    var m = Math.floor(rem / 60000);
+    var s = Math.floor((rem % 60000) / 1000);
+    countdownEl.textContent = "next candle " + m + ":" + (s < 10 ? "0" : "") + s;
+  }
+  setInterval(updateCountdown, 1000);
+
+  /* ── data-flash utility ──────────────────────────────────────────────────── */
+  function flash(el, cls) {
+    if (!el) return;
+    el.classList.remove(cls);
+    void el.offsetWidth;
+    el.classList.add(cls);
+    setTimeout(function () { el.classList.remove(cls); }, 800);
+  }
+
+  /* ── chart factory ───────────────────────────────────────────────────────── */
+  function baseOptions(el, extra) {
+    return Object.assign({
+      width:  el.clientWidth,
       height: el.clientHeight,
       layout: { background: { color: "transparent" }, textColor: C.text,
                 fontFamily: "'JetBrains Mono', monospace", fontSize: 10 },
@@ -31,9 +105,10 @@
       rightPriceScale: { borderColor: C.grid },
       timeScale: { borderColor: C.grid, timeVisible: true, secondsVisible: false },
       crosshair: { mode: 0 },
-    };
+    }, extra || {});
   }
 
+  /* ── main chart ──────────────────────────────────────────────────────────── */
   var chartEl = document.getElementById("chart");
   var chart   = LightweightCharts.createChart(chartEl, baseOptions(chartEl));
 
@@ -46,6 +121,7 @@
     priceLineVisible: false, lastValueVisible: false,
   });
   chart.priceScale("vol").applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+
   var ema7Series  = chart.addLineSeries({ color: C.ema7,  lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
   var ema25Series = chart.addLineSeries({ color: C.ema25, lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
   var ema99Series = chart.addLineSeries({ color: C.ema99, lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
@@ -60,6 +136,10 @@
   window.addEventListener("resize", function () {
     chart.applyOptions({ width: chartEl.clientWidth, height: chartEl.clientHeight });
     cvdChart.applyOptions({ width: cvdEl.clientWidth, height: cvdEl.clientHeight });
+    Object.values(_aiCharts).forEach(function (ctx) {
+      var el2 = document.getElementById("ai-chart-" + ctx.interval);
+      if (el2) ctx.chart.applyOptions({ width: el2.clientWidth, height: el2.clientHeight });
+    });
   });
 
   var priceLines  = [];
@@ -70,7 +150,7 @@
   var firstLoad   = true;
   var lastCandle  = null;
   var cvdBase     = 0;
-  var isLoading   = false;   // true while waiting for snapshot after market switch
+  var isLoading   = false;
 
   function volBar(c) {
     return {
@@ -108,18 +188,103 @@
     if (!a || a.error || a.symbol !== symbolEl.value) return;
     if (a.signal !== "LONG" && a.signal !== "SHORT") return;
     var col = a.signal === "LONG" ? C.green : C.red;
-    if (a.entry != null) addAILine(a.entry, col, "AI " + a.signal + " ENTRY \u00b7 " + a.confidence + "%", 0, 2);
+    if (a.entry != null) addAILine(a.entry, col, "AI " + a.signal + " ENTRY · " + a.confidence + "%", 0, 2);
     if (a.stop  != null) addAILine(a.stop,  C.red,   "AI STOP", 2);
     if (a.tp1   != null) addAILine(a.tp1,   C.green, "AI TP1",  2);
     if (a.tp2   != null) addAILine(a.tp2,   C.green, "AI TP2",  2);
   }
 
-  // ── price animation ─────────────────────────────────────────────────────────
+  /* ── AI predict limit-signal mini-charts (15m + 1h) ─────────────────────── */
+  var _aiCharts = {};   // keyed by "15m" | "1h" → { chart, series, lines, interval }
+
+  function miniChartOptions(el) {
+    return baseOptions(el, {
+      rightPriceScale: { borderColor: C.grid, scaleMargins: { top: 0.1, bottom: 0.1 } },
+      timeScale: { borderColor: C.grid, timeVisible: true, secondsVisible: false,
+                   rightOffset: 3, fixLeftEdge: false },
+    });
+  }
+
+  function getOrCreateAIChart(interval) {
+    if (_aiCharts[interval]) return _aiCharts[interval];
+    var el = document.getElementById("ai-chart-" + interval);
+    if (!el || !el.clientWidth) return null;
+    var ch = LightweightCharts.createChart(el, miniChartOptions(el));
+    var cs = ch.addCandlestickSeries({
+      upColor: C.green, downColor: C.red, borderVisible: false,
+      wickUpColor: C.green, wickDownColor: C.red,
+    });
+    _aiCharts[interval] = { chart: ch, series: cs, lines: [], interval: interval };
+    return _aiCharts[interval];
+  }
+
+  function renderAIChart(msg) {
+    if (!msg || !msg.candles || !msg.ai) return;
+
+    var interval = msg.interval;
+    var candles  = msg.candles;
+    var ai       = msg.ai;
+
+    // Only render for currently selected symbol
+    if (msg.symbol !== symbolEl.value) return;
+
+    // Show the chart card, hide the empty state
+    var emptyEl = document.getElementById("ai-chart-empty");
+    var rowEl   = document.getElementById("ai-chart-row");
+    var badgeEl = document.getElementById("ai-chart-badge");
+    if (emptyEl) emptyEl.style.display = "none";
+    if (rowEl)   rowEl.style.display = "";
+
+    // Update badge
+    if (badgeEl && ai.signal) {
+      badgeEl.className = "ai-signal-badge " + (ai.signal === "LONG" ? "long" : "short");
+      badgeEl.textContent = ai.signal + " · " + (ai.confidence || "?") + "% confidence";
+    }
+
+    // Update label
+    var labelEl = document.getElementById("ai-chart-" + interval)
+      && document.querySelector("#ai-chart-" + interval + "-col .ai-chart-label");
+    if (labelEl) labelEl.textContent = interval + " · " + (ai.setup_type || "Signal");
+
+    var ctx = getOrCreateAIChart(interval);
+    if (!ctx) return;
+
+    // Set candle data
+    ctx.series.setData(candles.map(function (c) {
+      return { time: c.time, open: c.open, high: c.high, low: c.low, close: c.close };
+    }));
+
+    // Clear old AI lines
+    ctx.lines.forEach(function (l) { ctx.series.removePriceLine(l); });
+    ctx.lines = [];
+
+    // Draw AI levels
+    var col = ai.signal === "LONG" ? C.green : C.red;
+    function mkLine(price, color, title, style, width) {
+      if (price == null) return;
+      ctx.lines.push(ctx.series.createPriceLine({
+        price: price, color: color, lineWidth: width || 1,
+        lineStyle: style === undefined ? 2 : style,
+        axisLabelVisible: true, title: title,
+      }));
+    }
+    mkLine(ai.entry, col,     "ENTRY",   0, 2);
+    mkLine(ai.stop,  C.red,   "STOP",    2, 1);
+    mkLine(ai.tp1,   C.green, "TP1",     2, 1);
+    mkLine(ai.tp2,   C.green, "TP2",     3, 1);
+
+    ctx.chart.timeScale().fitContent();
+
+    // Flash the card
+    flash(document.getElementById("ai-chart-card"), "card-flash");
+  }
+
+  /* ── price animation ─────────────────────────────────────────────────────── */
   var shownPrice = null, targetPrice = null, priceDigits = 2;
   function digitsFor(p) { return p >= 1000 ? 2 : p >= 1 ? 4 : 6; }
 
   function fmt(n, digits) {
-    if (n === null || n === undefined) return "\u2014";
+    if (n == null) return "—";
     return Number(n).toLocaleString("en-US", {
       minimumFractionDigits: digits === undefined ? 2 : digits,
       maximumFractionDigits: digits === undefined ? 2 : digits,
@@ -130,7 +295,7 @@
     if (targetPrice !== null) {
       if (shownPrice === null) shownPrice = targetPrice;
       var diff = targetPrice - shownPrice;
-      if (Math.abs(diff) > Math.abs(targetPrice) * 1e-7) shownPrice += diff * 0.25;
+      if (Math.abs(diff) > Math.abs(targetPrice) * 1e-7) shownPrice += diff * 0.22;
       else shownPrice = targetPrice;
       priceEl.textContent = fmt(shownPrice, priceDigits);
     }
@@ -149,32 +314,28 @@
     lastFlashPrice = p;
   }
 
-  // ── loading state (shown immediately on symbol/interval change) ──────────────
+  /* ── loading skeleton ────────────────────────────────────────────────────── */
   function showLoading(sym, intv) {
     isLoading = true;
     chartEl.classList.add("chart-loading");
 
-    // Verdict badge → loading
     var v = document.getElementById("verdict");
     v.className = "verdict-badge neutral loading-pulse";
-    v.textContent = "Loading " + sym + " \u00b7 " + intv + "\u2026";
+    v.textContent = "Loading " + sym + " · " + intv + "…";
 
-    // Clear price / chg / tape
     priceEl.classList.remove("flash-up", "flash-down");
-    priceEl.textContent = "\u2014";
+    priceEl.textContent = "—";
     var chg = document.getElementById("chg");
     chg.textContent = ""; chg.className = "chg";
     tapeEl.textContent = ""; tapeEl.className = "tape";
 
-    // Reset gauge
     document.getElementById("gauge-needle").style.left = "50%";
-    document.getElementById("gauge-score").textContent = "fetching data\u2026";
+    document.getElementById("gauge-score").textContent = "—";
+    if (countdownEl) countdownEl.textContent = "";
 
-    // Hide plan + fundamentals
     document.getElementById("plan-card").classList.add("hidden");
     document.getElementById("fund-card").classList.add("hidden");
 
-    // Clear chart data + overlays + AI lines
     clearOverlays();
     renderAI(null);
     candleSeries.setData([]);
@@ -184,15 +345,19 @@
     ema99Series.setData([]);
     cvdSeries.setData([]);
 
-    // Breakdown → skeleton rows
+    // Skeleton breakdown rows
     var host = document.getElementById("breakdown");
     host.innerHTML = "";
     for (var i = 0; i < 10; i++) {
       var sk = document.createElement("div");
       sk.className = "bd-row bd-skeleton";
-      sk.innerHTML = '<div class="bd-top"><span class="skel skel-name"></span><span class="skel skel-val"></span></div>' +
-                     '<div class="bd-bar"><div class="bd-mid"></div><div class="skel skel-bar"></div></div>' +
-                     '<div class="skel skel-why"></div>';
+      sk.innerHTML =
+        '<div class="bd-top">' +
+          '<span class="skel skel-name"></span>' +
+          '<span class="skel skel-val"></span>' +
+        '</div>' +
+        '<div class="bd-bar"><div class="bd-mid"></div><div class="skel skel-bar"></div></div>' +
+        '<div class="skel skel-why"></div>';
       host.appendChild(sk);
     }
   }
@@ -204,14 +369,23 @@
     v.classList.remove("loading-pulse");
   }
 
-  // ── tick / kline ─────────────────────────────────────────────────────────────
+  /* ── tick / kline handling ───────────────────────────────────────────────── */
   function onTick(t) {
-    if (isLoading) return;   // discard stale ticks for previous market
+    _tickCount++;
+    if (t.sell) _sellVol += t.qty; else _buyVol += t.qty;
+    updatePressure();
+
+    if (isLoading) return;
+
     priceDigits = digitsFor(t.price);
     targetPrice = t.price;
     flashPrice(t.price);
-    tapeEl.textContent = (t.sell ? "\u25bc " : "\u25b2 ") + fmt(t.qty, 4) + " @ " + fmt(t.price, priceDigits);
-    tapeEl.className = "tape " + (t.sell ? "down" : "up");
+
+    // Format tape with size indicator
+    var sizeTag = t.qty > 10 ? " ●" : t.qty > 1 ? " ·" : "";
+    tapeEl.textContent = (t.sell ? "▼ " : "▲ ") + fmt(t.qty, 3) + sizeTag + "  @ " + fmt(t.price, priceDigits);
+    tapeEl.className   = "tape " + (t.sell ? "down" : "up") + (t.qty > 5 ? " big" : "");
+
     if (lastCandle && t.time / 1000 >= lastCandle.time) {
       lastCandle.close = t.price;
       if (t.price > lastCandle.high) lastCandle.high = t.price;
@@ -227,8 +401,13 @@
 
   function onKline(m) {
     var c = m.candle;
-    if (lastCandle && c.time > lastCandle.time) cvdBase += lastCandle.delta || 0;
+    if (lastCandle && c.time > lastCandle.time) {
+      cvdBase += lastCandle.delta || 0;
+    }
     lastCandle = c;
+    _lastCandleTime = c.time;
+    _intervalMs = INTERVAL_MS[intervalEl.value] || 3600000;
+
     candleSeries.update({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close });
     volumeSeries.update(volBar(c));
     cvdSeries.update({ time: c.time, value: cvdBase + (c.delta || 0) });
@@ -237,7 +416,7 @@
     flashPrice(c.close);
   }
 
-  // ── snapshot rendering ───────────────────────────────────────────────────────
+  /* ── snapshot rendering ──────────────────────────────────────────────────── */
   function renderChart(d) {
     var ov = d.overlays || {};
     candleSeries.setData(d.candles.map(function (c) {
@@ -250,6 +429,10 @@
     cvdSeries.setData(ov.cvd || []);
 
     lastCandle = d.candles.length ? Object.assign({}, d.candles[d.candles.length - 1]) : null;
+    if (lastCandle) {
+      _lastCandleTime = lastCandle.time;
+      _intervalMs = INTERVAL_MS[intervalEl.value] || 3600000;
+    }
     var cvd = ov.cvd || [];
     cvdBase = cvd.length >= 2 ? cvd[cvd.length - 2].value : 0;
 
@@ -279,7 +462,8 @@
         lineWidth: 1, lineStyle: 0, priceLineVisible: false,
         lastValueVisible: false, crosshairMarkerVisible: false,
       });
-      s.setData([{ time: tl.start.time, value: tl.start.price }, { time: tl.end.time, value: tl.end.price }]);
+      s.setData([{ time: tl.start.time, value: tl.start.price },
+                 { time: tl.end.time,   value: tl.end.price }]);
       trendSeries.push(s);
     });
 
@@ -315,6 +499,7 @@
       var pct = d.ticker.change_pct;
       chg.textContent = (pct >= 0 ? "+" : "") + pct.toFixed(2) + "% 24h";
       chg.className = "chg " + (pct >= 0 ? "up" : "down");
+      flash(chg, "data-flash");
     }
 
     var v = document.getElementById("verdict");
@@ -326,16 +511,17 @@
       v.textContent = (d.strength ? d.strength + " " : "") + "SHORT SIGNAL";
     } else {
       v.className = "verdict-badge neutral";
-      v.textContent = "NEUTRAL \u00b7 waiting for confluence";
+      v.textContent = "NEUTRAL · waiting for confluence";
     }
 
+    // Animate gauge needle
     document.getElementById("gauge-needle").style.left = (50 + d.composite / 2) + "%";
     var scoreEl = document.getElementById("gauge-score");
     var from = shownScore, to = d.composite, t0 = performance.now();
     (function step(now) {
-      var k = Math.min((now - t0) / 600, 1);
+      var k = Math.min((now - t0) / 700, 1);
       var val = from + (to - from) * (1 - Math.pow(1 - k, 3));
-      scoreEl.textContent = "score " + val.toFixed(1) + " / \u00b1" + d.threshold + " to fire";
+      scoreEl.textContent = (val > 0 ? "+" : "") + val.toFixed(1) + "  (threshold ±" + d.threshold + ")";
       if (k < 1) requestAnimationFrame(step); else shownScore = to;
     })(t0);
 
@@ -346,6 +532,7 @@
       document.getElementById("plan-stop").textContent  = fmt(d.plan.stop,  priceDigits);
       document.getElementById("plan-tp1").textContent   = fmt(d.plan.tp1,   priceDigits);
       document.getElementById("plan-tp2").textContent   = fmt(d.plan.tp2,   priceDigits);
+      flash(planCard, "card-flash");
     } else {
       planCard.classList.add("hidden");
     }
@@ -353,7 +540,6 @@
 
   function renderBreakdown(d) {
     var host = document.getElementById("breakdown");
-    // If we have skeleton rows, replace them all
     var hasSkeleton = host.querySelector(".bd-skeleton");
     if (hasSkeleton || host.childElementCount !== d.breakdown.length) host.innerHTML = "";
     var build = host.childElementCount !== d.breakdown.length;
@@ -373,14 +559,24 @@
       } else {
         row = host.children[i];
       }
-      row.querySelector(".bd-name").innerHTML = b.label + ' <span class="bd-wt">(w' + b.weight + ")</span>";
+
+      row.querySelector(".bd-name").innerHTML =
+        b.label + ' <span class="bd-wt">(w' + b.weight + ")</span>";
       var valEl = row.querySelector(".bd-val");
       valEl.className = "bd-val " + cls;
       valEl.textContent = (b.contribution > 0 ? "+" : "") + b.contribution;
+
       var fill = row.querySelector(".bd-fill");
       fill.className = "bd-fill " + (b.score >= 0 ? "pos" : "neg");
-      fill.style.width = pct + "%";
-      row.children[2].textContent = b.reasons.join(" \u00b7 ");
+      // Animate bar width after a brief delay so CSS transition fires
+      fill.style.width = "0%";
+      (function (f, p) {
+        requestAnimationFrame(function () {
+          requestAnimationFrame(function () { f.style.width = p + "%"; });
+        });
+      })(fill, pct);
+
+      row.children[2].textContent = b.reasons.join(" · ");
     });
   }
 
@@ -396,6 +592,7 @@
     document.getElementById("f-oi").textContent   = (f.oi_change_pct >= 0 ? "+" : "") + f.oi_change_pct.toFixed(1) + "%";
     document.getElementById("f-ls").textContent   = f.long_short_ratio.toFixed(2);
     document.getElementById("f-mark").textContent = fmt(f.mark_price, priceDigits);
+    flash(card, "card-flash");
   }
 
   function renderSnapshot(d) {
@@ -406,7 +603,7 @@
     renderFundamentals(d);
   }
 
-  // ── AI Engine Status widget ──────────────────────────────────────────────────
+  /* ── AI Engine Status widget ─────────────────────────────────────────────── */
   var waveBarsEl = document.getElementById("wave-bars");
   var WAVE_COUNT = 28;
   (function buildWave() {
@@ -421,14 +618,14 @@
   var engineOnline = false;
 
   function animateWave() {
-    wavePhase += 0.07;
+    wavePhase += engineOnline ? 0.08 : 0.03;
     var bars = waveBarsEl.children;
     for (var i = 0; i < bars.length; i++) {
       var base  = Math.sin(wavePhase + i * 0.45) * 0.38 + 0.5;
       var noise = Math.sin(wavePhase * 2.1 + i * 0.85) * 0.18;
       var h = Math.max(0.05, Math.min(1.0, base + noise));
       bars[i].style.height  = (h * 30) + "px";
-      bars[i].style.opacity = engineOnline ? (0.25 + h * 0.75) : 0.12;
+      bars[i].style.opacity = engineOnline ? (0.25 + h * 0.75) : 0.1;
     }
     requestAnimationFrame(animateWave);
   }
@@ -447,52 +644,48 @@
     dot.className   = s.online ? "es-dot online" : "es-dot";
     label.textContent = s.online ? "Online" : "Offline";
     version.textContent = s.version || "v4.2";
-    models.textContent  = s.active_models ? s.active_models + " active" : "\u2014";
+    models.textContent  = s.active_models ? s.active_models + " active" : "—";
 
     if (s.latency_ms != null) {
       latency.textContent = s.latency_ms + "ms";
       latency.className = "es-metric-value " +
         (s.latency_ms < 1000 ? "green" : s.latency_ms < 3000 ? "amber" : "red");
     } else {
-      latency.textContent = "\u2014";
+      latency.textContent = "—";
       latency.className = "es-metric-value";
     }
 
     var rate = s.inference_per_min || 0;
     inference.textContent = rate >= 1000 ? (rate / 1000).toFixed(1) + "k/min" : rate + "/min";
+    flash(document.getElementById("engine-status-card"), "card-flash-subtle");
   }
 
-  // ── Binance status ───────────────────────────────────────────────────────────
+  /* ── Binance status ──────────────────────────────────────────────────────── */
   function fetchBinanceStatus() {
     fetch("/api/binance-key-status")
       .then(function (r) { return r.json(); })
       .then(function (d) {
         var configured = d.api_key_configured && d.api_secret_configured;
-        var keyEl    = document.getElementById("bnb-key");
-        var secretEl = document.getElementById("bnb-secret");
-        var ordersEl = document.getElementById("bnb-orders");
-        var modeEl   = document.getElementById("bnb-mode");
-        var hintEl   = document.getElementById("bnb-hint");
-
-        keyEl.textContent    = d.api_key_configured    ? "Configured" : "Not set";
-        keyEl.className      = "es-metric-value " + (d.api_key_configured    ? "green" : "red");
-        secretEl.textContent = d.api_secret_configured ? "Configured" : "Not set";
-        secretEl.className   = "es-metric-value " + (d.api_secret_configured ? "green" : "red");
-        ordersEl.textContent = configured ? "Enabled" : "Read-only";
-        ordersEl.className   = "es-metric-value " + (configured ? "green" : "");
-        modeEl.textContent   = configured ? "Authenticated" : "Public";
-        modeEl.className     = "es-version "  + (configured ? "green" : "");
-        hintEl.style.display = configured ? "none" : "";
+        document.getElementById("bnb-key").textContent    = d.api_key_configured    ? "Configured" : "Not set";
+        document.getElementById("bnb-key").className      = "es-metric-value " + (d.api_key_configured    ? "green" : "red");
+        document.getElementById("bnb-secret").textContent = d.api_secret_configured ? "Configured" : "Not set";
+        document.getElementById("bnb-secret").className   = "es-metric-value " + (d.api_secret_configured ? "green" : "red");
+        document.getElementById("bnb-orders").textContent = configured ? "Enabled"  : "Read-only";
+        document.getElementById("bnb-orders").className   = "es-metric-value " + (configured ? "green" : "");
+        document.getElementById("bnb-mode").textContent   = configured ? "Authenticated" : "Public";
+        document.getElementById("bnb-mode").className     = "es-version " + (configured ? "green" : "");
+        document.getElementById("bnb-hint").style.display = configured ? "none" : "";
       })
       .catch(function () {});
   }
   fetchBinanceStatus();
 
-  // ── Recent AI Signals table ──────────────────────────────────────────────────
-  var allSignalRows  = [];   // full dataset from server
-  var sigFilterMode  = "all"; // "all" | "symbol"
-  var filterBtnEl    = document.getElementById("sig-filter-btn");
-  var sigCountEl     = document.getElementById("sig-count");
+  /* ── Recent AI Signals table ─────────────────────────────────────────────── */
+  var allSignalRows = [];
+  var sigFilterMode = "all";
+  var filterBtnEl   = document.getElementById("sig-filter-btn");
+  var sigCountEl    = document.getElementById("sig-count");
+  var relTimeEls    = [];
 
   if (filterBtnEl) {
     filterBtnEl.addEventListener("click", function () {
@@ -503,7 +696,6 @@
     });
   }
 
-  // Update filter button label when symbol changes
   function updateFilterLabel() {
     if (!filterBtnEl) return;
     filterBtnEl.textContent = sigFilterMode === "all" ? "All symbols" : symbolEl.value + " only";
@@ -511,8 +703,8 @@
 
   function relTime(ts) {
     var diff = Math.floor(Date.now() / 1000) - ts;
-    if (diff < 5)   return "just now";
-    if (diff < 60)  return diff + "s ago";
+    if (diff < 5)    return "just now";
+    if (diff < 60)   return diff + "s ago";
     if (diff < 3600) return Math.floor(diff / 60) + "m ago";
     if (diff < 86400) return Math.floor(diff / 3600) + "h ago";
     return Math.floor(diff / 86400) + "d ago";
@@ -525,12 +717,8 @@
     });
   }
 
-  // Periodically refresh relative timestamps without re-rendering everything
-  var relTimeEls = [];
   setInterval(function () {
-    relTimeEls.forEach(function (obj) {
-      obj.el.textContent = relTime(obj.ts);
-    });
+    relTimeEls.forEach(function (obj) { obj.el.textContent = relTime(obj.ts); });
   }, 15000);
 
   function redrawSigTable() {
@@ -540,7 +728,7 @@
       rows = rows.filter(function (r) { return r.symbol === sym; });
     }
 
-    var tbody   = document.getElementById("ai-sig-tbody");
+    var tbody = document.getElementById("ai-sig-tbody");
     tbody.innerHTML = "";
     relTimeEls = [];
 
@@ -549,7 +737,7 @@
       empty.className = "ai-sig-empty";
       var msg = sigFilterMode === "symbol"
         ? "No AI signals for " + (symbolEl.value || "this symbol") + " yet"
-        : "No AI signals yet \u2014 watching for high-quality setups\u2026";
+        : "No AI signals yet — watching for high-quality setups…";
       empty.innerHTML = "<td colspan='5'>" + msg + "</td>";
       tbody.appendChild(empty);
       sigCountEl.textContent = "";
@@ -559,20 +747,20 @@
     sigCountEl.textContent = rows.length + " signal" + (rows.length !== 1 ? "s" : "");
 
     rows.forEach(function (row, idx) {
-      var isLong   = row.direction === "LONG";
-      var conf     = row.confidence || 0;
-      var confPct  = conf + "%";
-      var confBarW = Math.max(4, conf) + "%";
-      var confCls  = conf >= 75 ? "conf-high" : conf >= 55 ? "conf-mid" : "conf-low";
-      var dirArrow = isLong ? "\u2191" : "\u2193";
+      var isLong  = row.direction === "LONG";
+      var conf    = row.confidence || 0;
+      var confCls = conf >= 75 ? "conf-high" : conf >= 55 ? "conf-mid" : "conf-low";
+      var dirArrow = isLong ? "↑" : "↓";
       var dirCls   = isLong ? "dir-long" : "dir-short";
-      var symCls   = "sym-badge sym-" + (row.symbol || "").replace("USDT", "").toLowerCase();
+      var symBase  = (row.symbol || "").replace("USDT", "").toLowerCase();
+      var symCls   = "sym-badge sym-" + symBase;
 
       var tr = document.createElement("tr");
       tr.setAttribute("data-symbol", row.symbol || "");
-      if (idx === 0 && !rows._seeded) tr.classList.add("ai-sig-new");
+      if (idx === 0) tr.classList.add("ai-sig-new");
+      tr.style.cursor = "pointer";
 
-      // Time cell — relative text, absolute tooltip
+      // Time cell
       var timeEl = document.createElement("td");
       timeEl.className = "time-cell";
       timeEl.textContent = relTime(row.time);
@@ -580,16 +768,16 @@
       relTimeEls.push({ el: timeEl, ts: row.time });
 
       // Symbol badge
-      var symTd = document.createElement("td");
+      var symTd  = document.createElement("td");
       var badge  = document.createElement("span");
       badge.className = symCls;
-      badge.textContent = row.symbol || "\u2014";
+      badge.textContent = row.symbol || "—";
       symTd.appendChild(badge);
 
-      // Setup type
+      // Setup
       var setupTd = document.createElement("td");
       setupTd.className = "setup-cell";
-      setupTd.textContent = row.setup_type || "\u2014";
+      setupTd.textContent = row.setup_type || "—";
       setupTd.title = row.setup_type || "";
 
       // Direction
@@ -597,12 +785,14 @@
       dirTd.className = dirCls;
       dirTd.innerHTML = '<span class="dir-arrow">' + dirArrow + "</span> " + row.direction;
 
-      // Confidence with mini bar
+      // Confidence with bar
       var confTd = document.createElement("td");
       confTd.innerHTML =
         '<div class="conf-cell">' +
-          '<div class="conf-bar-track"><div class="conf-bar-fill ' + confCls + '" style="width:' + confBarW + '"></div></div>' +
-          '<span class="conf-num ' + confCls + '">' + confPct + '</span>' +
+          '<div class="conf-bar-track">' +
+            '<div class="conf-bar-fill ' + confCls + '" style="width:' + Math.max(4, conf) + '%"></div>' +
+          '</div>' +
+          '<span class="conf-num ' + confCls + '">' + conf + '%</span>' +
         '</div>';
 
       tr.appendChild(timeEl);
@@ -612,13 +802,12 @@
       tr.appendChild(confTd);
       tbody.appendChild(tr);
 
-      // Click row → switch to that symbol
-      tr.style.cursor = "pointer";
       tr.addEventListener("click", function () {
-        var sym = this.getAttribute("data-symbol");
-        if (sym && sym !== symbolEl.value) {
-          symbolEl.value = sym;
-          symbolEl.dispatchEvent(new Event("change"));
+        var s = this.getAttribute("data-symbol");
+        if (s && s !== symbolEl.value) {
+          symbolEl.value = s;
+          localStorage.setItem(LS_SYM, s);
+          reset();
         }
       });
     });
@@ -630,19 +819,19 @@
     redrawSigTable();
   }
 
-  // ── signal cards (detail feed) ───────────────────────────────────────────────
+  /* ── signal cards (detail feed) ──────────────────────────────────────────── */
   function signalCard(s) {
     var el = document.createElement("div");
     el.className = "sig " + s.direction.toLowerCase();
     var when = new Date(s.time * 1000).toLocaleString();
     el.innerHTML =
       '<div class="sig-top">' +
-        '<span class="sig-dir">' + s.direction + (s.strength ? " \u00b7 " + s.strength : "") + "</span>" +
-        '<span class="sig-meta">' + s.symbol + " " + s.interval + " \u00b7 " + s.score + "% confidence</span>" +
+        '<span class="sig-dir">' + s.direction + (s.strength ? " · " + s.strength : "") + "</span>" +
+        '<span class="sig-meta">' + s.symbol + " " + s.interval + " · " + s.score + "% confidence</span>" +
       '</div>' +
-      '<div class="sig-meta">' + when + " \u00b7 @ " + fmt(s.price, digitsFor(s.price)) + "</div>" +
+      '<div class="sig-meta">' + when + " · @ " + fmt(s.price, digitsFor(s.price)) + "</div>" +
       (s.reasons && s.reasons.length
-        ? '<div class="sig-reasons">' + s.reasons.filter(Boolean).slice(0, 2).join(" \u00b7 ") + "</div>"
+        ? '<div class="sig-reasons">' + s.reasons.filter(Boolean).slice(0, 2).join(" · ") + "</div>"
         : "");
     return el;
   }
@@ -668,7 +857,7 @@
     var t = document.createElement("div");
     t.className = "toast " + s.direction.toLowerCase();
     t.innerHTML =
-      '<span class="toast-dir">' + s.direction + (s.strength ? " \u00b7 " + s.strength : "") + "</span>" +
+      '<span class="toast-dir">' + s.direction + (s.strength ? " · " + s.strength : "") + "</span>" +
       '<span class="toast-meta">' + s.symbol + " " + s.interval + " @ " + fmt(s.price, digitsFor(s.price)) + "</span>";
     toastsEl.appendChild(t);
     setTimeout(function () {
@@ -686,7 +875,7 @@
     lastAIKey = key;
     pushSignal({
       direction: a.signal,
-      strength:  "AI \u00b7 " + a.confidence + "%",
+      strength:  "AI · " + a.confidence + "%",
       symbol:    a.symbol,
       interval:  a.interval,
       score:     a.confidence,
@@ -696,18 +885,28 @@
     });
   }
 
-  // ── selectors ────────────────────────────────────────────────────────────────
-  function fillSelect(el, values, selected) {
+  /* ── selectors with localStorage restore ────────────────────────────────── */
+  function fillSelect(el, values, serverDefault) {
     if (el.childElementCount) return;
+    var lsKey = el === symbolEl ? LS_SYM : LS_INT;
+    var saved = localStorage.getItem(lsKey);
+    // Only use saved value if it's still a valid option
+    var pick = (saved && values.indexOf(saved) >= 0) ? saved : serverDefault;
     values.forEach(function (v) {
       var o = document.createElement("option");
       o.value = v; o.textContent = v;
-      if (v === selected) o.selected = true;
+      if (v === pick) o.selected = true;
       el.appendChild(o);
     });
+    // If restored to non-default, subscribe after both selects are ready
+    if (pick !== serverDefault) {
+      setTimeout(function () {
+        if (symbolEl.childElementCount && intervalEl.childElementCount) subscribe();
+      }, 80);
+    }
   }
 
-  // ── WebSocket ────────────────────────────────────────────────────────────────
+  /* ── WebSocket ───────────────────────────────────────────────────────────── */
   var ws = null, reconnectDelay = 1000, pingTimer = null;
 
   function subscribe() {
@@ -737,7 +936,7 @@
       try { m = JSON.parse(ev.data); } catch (e) { return; }
       switch (m.type) {
         case "config":
-          fillSelect(symbolEl, m.symbols, m.default_symbol);
+          fillSelect(symbolEl,   m.symbols,   m.default_symbol);
           fillSelect(intervalEl, m.intervals, m.default_interval);
           break;
         case "snapshot":
@@ -758,6 +957,9 @@
           break;
         case "ai":
           onAI(m.data);
+          break;
+        case "ai_chart":
+          renderAIChart(m);
           break;
         case "engine_status":
           renderEngineStatus(m.data);
@@ -783,34 +985,47 @@
     ws.onerror = function () { ws.close(); };
   }
 
-  // ── reset on market change ───────────────────────────────────────────────────
+  /* ── reset on market change ──────────────────────────────────────────────── */
   function reset() {
     var sym  = symbolEl.value;
     var intv = intervalEl.value;
 
-    // State
+    // Persist selection immediately
+    localStorage.setItem(LS_SYM, sym);
+    localStorage.setItem(LS_INT, intv);
+
     firstLoad      = true;
     lastCandle     = null;
-    lastAI         = null;   // clear old AI → lines get removed in showLoading → renderAI(null)
+    lastAI         = null;
     lastAIKey      = "";
     lastFlashPrice = null;
     shownPrice     = null;
     targetPrice    = null;
     shownScore     = 0;
+    _buyVol        = 0;
+    _sellVol       = 0;
+    _lastCandleTime = 0;
 
-    // Immediate visual feedback
+    // Reset AI chart section
+    var emptyEl = document.getElementById("ai-chart-empty");
+    var rowEl   = document.getElementById("ai-chart-row");
+    var badgeEl = document.getElementById("ai-chart-badge");
+    if (emptyEl) emptyEl.style.display = "";
+    if (rowEl)   rowEl.style.display = "none";
+    if (badgeEl) { badgeEl.textContent = ""; badgeEl.className = "ai-signal-badge hidden"; }
+    // Destroy old mini charts so they reinit for the new symbol
+    Object.values(_aiCharts).forEach(function (ctx) { ctx.chart.remove(); });
+    _aiCharts = {};
+
     showLoading(sym, intv);
     updateFilterLabel();
-
-    // Update table filter if "symbol" mode
     if (sigFilterMode === "symbol") redrawSigTable();
 
-    // Ask server for the new market
     subscribe();
   }
 
-  symbolEl.addEventListener("change",  reset);
-  intervalEl.addEventListener("change", reset);
+  symbolEl.addEventListener("change",  function () { localStorage.setItem(LS_SYM, symbolEl.value);   reset(); });
+  intervalEl.addEventListener("change", function () { localStorage.setItem(LS_INT, intervalEl.value); reset(); });
 
   connect();
 })();

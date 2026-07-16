@@ -152,6 +152,11 @@ async def ws_endpoint(request: web.Request) -> web.WebSocketResponse:
                         cached_ai = ai_analyst.get_cached(symbol)
                         if cached_ai:
                             client.send({"type": "ai", "data": cached_ai})
+                        # Push cached AI chart data for both timeframes
+                        for tf in AI_CHART_INTERVALS:
+                            cached_chart = _ai_chart_cache.get(f"{symbol}_{tf}")
+                            if cached_chart:
+                                client.send(cached_chart)
             elif msg.get("type") == "ping":
                 client.send({"type": "pong", "t": msg.get("t")})
     finally:
@@ -160,6 +165,46 @@ async def ws_endpoint(request: web.Request) -> web.WebSocketResponse:
         with contextlib.suppress(asyncio.CancelledError):
             await send_task
     return ws
+
+
+# Cache of most recent AI chart payloads per symbol+interval, sent to new subscribers.
+_ai_chart_cache: dict[str, dict] = {}
+
+AI_CHART_INTERVALS = ["15m", "1h"]
+
+
+async def _push_ai_charts(symbol: str, ai_result: dict):
+    """Fetch 15m and 1h candles and push ai_chart messages for clients watching symbol."""
+    sig = ai_result.get("signal")
+    if sig not in ("LONG", "SHORT"):
+        return
+    for tf in AI_CHART_INTERVALS:
+        try:
+            state = await asyncio.to_thread(engine.get_state, symbol, tf)
+            payload = {
+                "type": "ai_chart",
+                "symbol": symbol,
+                "interval": tf,
+                "candles": state.get("candles", [])[-60:],
+                "ai": {
+                    "signal": sig,
+                    "entry": ai_result.get("entry"),
+                    "stop": ai_result.get("stop"),
+                    "tp1": ai_result.get("tp1"),
+                    "tp2": ai_result.get("tp2"),
+                    "confidence": ai_result.get("confidence"),
+                    "setup_type": ai_result.get("setup_type"),
+                    "updated": ai_result.get("updated"),
+                },
+            }
+            _ai_chart_cache[f"{symbol}_{tf}"] = payload
+            for c in manager.clients:
+                if c.symbol == symbol:
+                    c.send(payload)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
 
 
 # ---------------- AI analyst loop ----------------
@@ -178,9 +223,10 @@ async def _ai_loop():
                 for c in manager.clients:
                     if c.symbol == symbol:
                         c.send(ai_payload)
-                    # Push status and signals table to all clients.
                     c.send(status_payload)
                     c.send(signals_payload)
+                # Push 15m/1h AI chart data when a signal fires.
+                asyncio.create_task(_push_ai_charts(symbol, result))
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
