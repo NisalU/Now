@@ -1276,14 +1276,19 @@
   }
 
   /* ── signal cards ────────────────────────────────────────────────────────── */
+  var _pendingLimits = [];
+
   function signalCard(s) {
     var el = document.createElement("div");
     el.className = "sig " + s.direction.toLowerCase();
     var when = new Date(s.time * 1000).toLocaleString();
+    var orderBadge = s.order_type === "LIMIT"
+      ? ' <span class="badge-limit">LIMIT</span>'
+      : ' <span class="badge-market">MARKET</span>';
     el.innerHTML =
       '<div class="sig-top">' +
-        '<span class="sig-dir">' + s.direction + (s.strength ? " · " + s.strength : "") + "</span>" +
-        '<span class="sig-meta">' + s.symbol + " " + s.interval + " · " + s.score + "% confidence</span>" +
+        '<span class="sig-dir">' + s.direction + (s.strength ? " · " + s.strength : "") + orderBadge + "</span>" +
+        '<span class="sig-meta">' + s.symbol + " " + (s.interval || "") + " · " + s.score + "% confidence</span>" +
       "</div>" +
       '<div class="sig-meta">' + when + " · @ " + fmt(s.price, digitsFor(s.price)) + "</div>" +
       (s.reasons && s.reasons.length
@@ -1314,12 +1319,80 @@
     t.className = "toast " + s.direction.toLowerCase();
     t.innerHTML =
       '<span class="toast-dir">' + s.direction + (s.strength ? " · " + s.strength : "") + "</span>" +
-      '<span class="toast-meta">' + s.symbol + " " + s.interval + " @ " + fmt(s.price, digitsFor(s.price)) + "</span>";
+      '<span class="toast-meta">' + s.symbol + " " + (s.interval || "") + " @ " + fmt(s.price, digitsFor(s.price)) + "</span>";
     toastsEl.appendChild(t);
     setTimeout(function () {
       t.classList.add("toast-out");
       setTimeout(function () { t.remove(); }, 400);
     }, 6000);
+  }
+
+  /* ── Pending Limit Orders ───────────────────────────────────────────────── */
+  function renderPendingLimits(data) {
+    _pendingLimits = data || [];
+    var container = document.getElementById("pending-limits-list");
+    var emptyEl   = document.getElementById("pending-limits-empty");
+    var countEl   = document.getElementById("pending-limits-count");
+    if (!container) return;
+    if (!_pendingLimits.length) {
+      container.innerHTML = "";
+      if (emptyEl) emptyEl.style.display = "";
+      if (countEl) countEl.textContent   = "";
+      return;
+    }
+    if (emptyEl) emptyEl.style.display = "none";
+    if (countEl) countEl.textContent   = _pendingLimits.length + " pending";
+    container.innerHTML = "";
+    _pendingLimits.forEach(function (order) {
+      var d    = digitsFor(order.entry || 1);
+      var row  = document.createElement("div");
+      row.className = "pending-limit-row " + order.direction.toLowerCase();
+      var tpText = order.tp1 != null
+        ? fmt(order.tp1, d) + (order.tp2 != null ? " / " + fmt(order.tp2, d) : "")
+        : "—";
+      row.innerHTML =
+        '<div class="pl-left">' +
+          '<span class="pl-dir ' + order.direction.toLowerCase() + '">' + order.direction + "</span>" +
+          '<span class="pl-sym">' + order.symbol + "</span>" +
+          '<span class="badge-limit">LIMIT</span>' +
+          '<span class="pl-k" style="margin-left:6px;font-size:.68rem;color:#4b5563">' + (order.setup_type || "") + "</span>" +
+        "</div>" +
+        '<div class="pl-levels">' +
+          '<span class="pl-kv"><span class="pl-k">Entry</span> <span class="pl-v">'     + fmt(order.entry, d) + "</span></span>" +
+          '<span class="pl-kv"><span class="pl-k">Stop</span>  <span class="pl-v red">' + fmt(order.stop,  d) + "</span></span>" +
+          '<span class="pl-kv"><span class="pl-k">TP</span>    <span class="pl-v green">' + tpText + "</span></span>" +
+          (order.confidence ? '<span class="pl-kv"><span class="pl-k">Conf</span> <span class="pl-v">' + order.confidence + "%</span></span>" : "") +
+        "</div>" +
+        '<div class="pl-meta">' + (order.reasoning || "—").slice(0, 100) + "</div>";
+      container.appendChild(row);
+    });
+  }
+
+  function onLimitTriggered(order) {
+    /* Push triggered order into the signals feed with a LIMIT badge */
+    pushSignal({
+      direction:  order.direction,
+      strength:   "LIMIT HIT · " + order.confidence + "%",
+      order_type: "LIMIT",
+      symbol:     order.symbol,
+      interval:   "—",
+      score:      order.confidence,
+      time:       order.trigger_time || Math.floor(Date.now() / 1000),
+      price:      order.trigger_price || order.entry,
+      reasons:    ["limit entry triggered"],
+    });
+    /* Flash a more prominent toast */
+    var t = document.createElement("div");
+    t.className = "toast " + order.direction.toLowerCase();
+    t.innerHTML =
+      "<span class=\"toast-dir\">⚡ LIMIT " + order.direction + " TRIGGERED</span>" +
+      "<span class=\"toast-meta\">" + order.symbol + " @ " +
+        fmt(order.trigger_price || order.entry, digitsFor(order.entry || 1)) + "</span>";
+    toastsEl.appendChild(t);
+    setTimeout(function () {
+      t.classList.add("toast-out");
+      setTimeout(function () { t.remove(); }, 400);
+    }, 8000);
   }
 
   function onAI(a) {
@@ -1345,14 +1418,15 @@
     if (key === lastAIKey) return;
     lastAIKey = key;
     pushSignal({
-      direction: a.signal,
-      strength:  "AI · " + a.confidence + "%",
-      symbol:    a.symbol,
-      interval:  a.interval,
-      score:     a.confidence,
-      time:      a.updated,
-      price:     a.entry != null ? a.entry : a.price,
-      reasons:   [a.setup_type, a.orderflow_read].filter(Boolean),
+      direction:  a.signal,
+      strength:   "AI · " + a.confidence + "%",
+      order_type: a.order_type || "MARKET",
+      symbol:     a.symbol,
+      interval:   a.interval,
+      score:      a.confidence,
+      time:       a.updated,
+      price:      a.entry != null ? a.entry : a.price,
+      reasons:    [a.setup_type, a.orderflow_read].filter(Boolean),
     });
   }
 
@@ -1437,6 +1511,12 @@
         case "ai_signals_table":
           renderAISignalsTable(m.data);
           break;
+        case "pending_limits":
+          renderPendingLimits(m.data);
+          break;
+        case "limit_triggered":
+          onLimitTriggered(m.data);
+          break;
         case "pipeline_log":
           renderPipelineEvents(m.data);
           break;
@@ -1482,6 +1562,9 @@
 
     // Clear signal lock banner
     showSignalLock(false);
+
+    // Clear pending limits display (will be refreshed via subscribe)
+    renderPendingLimits([]);
 
     // Reset AI chart section
     var emptyEl = document.getElementById("ai-chart-empty");

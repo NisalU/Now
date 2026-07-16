@@ -79,19 +79,30 @@ YOUR JOB is to find the best trade right now — not to wait for perfection.
    • Swing:             R:R ≥ 1.5
    • There is NO requirement for R:R ≥ 2.  Good trades exist at 1.2–1.8.
 
-5. ENTRY, STOP, TARGET — always fill these for LONG/SHORT.
-   • Entry: current price, or nearest retest level within 0.5 ATR.
-   • Stop:  below / above the nearest structural low/high or order block — typically 0.5–1.5 ATR.
-   • TP1:   nearest significant level (prev high/low, FVG mid, OB edge) — minimum 1.2× risk.
-   • TP2:   next significant level if one exists; else omit.
+5. ENTRY, STOP, TAKE-PROFIT — MANDATORY for every LONG/SHORT. NEVER leave null or empty.
+   • Entry: current price for MARKET orders, or the exact retest level for LIMIT orders.
+   • Stop:  beyond the structural invalidation level — 0.5–1.5 ATR.
+   • take_profit: MUST be a 2-element array [tp1, tp2]. Both values are required.
+     - tp1 = nearest opposing structural level at minimum 1.2× risk from entry.
+     - tp2 = next structural level beyond tp1.
+     - No structural level? Calculate: risk = abs(entry - stop_loss),
+       tp1 = entry ± risk*1.5,  tp2 = entry ± risk*3.0  (+ for LONG, − for SHORT).
+     - Returning [] or [null] for take_profit is a hard failure. Always provide numbers.
 
-6. WHEN TO RETURN WAIT (strict — only these cases):
+6. ORDER TYPE — required for every LONG/SHORT signal.
+   • "MARKET" — price is at or within 0.3 ATR of your entry level right now. Enter immediately.
+   • "LIMIT"  — price needs to retrace more than 0.3 ATR to reach your entry. Place a limit order.
+   Both types are valid signals. LIMIT means "watch for this level; fill when price arrives."
+   You may fire a MARKET signal at current price AND a LIMIT signal at a retest level simultaneously
+   when both setups are present.
+
+7. WHEN TO RETURN WAIT (strict — only these cases):
    • No identifiable support, resistance, order block, or FVG within 1.5 ATR of current price.
    • A major macro event is imminent (funding rate > 0.15%, OI spike, news gap — flagged in data).
    • Price is mid-air between two levels with less than 0.8 ATR to the nearest boundary — genuinely structureless.
    WAIT is NOT appropriate because "the market could go either way" — ALL markets can go either way.
 
-7. CONFIDENCE MEANING.
+8. CONFIDENCE MEANING.
    Confidence reflects conviction in the trade, not in waiting.
    • 80–100 = strong setup, take the trade
    • 60–79  = decent setup, valid entry
@@ -104,10 +115,11 @@ YOUR JOB is to find the best trade right now — not to wait for perfection.
 
 Step 1 — Read the engine_composite_score to establish direction bias.
 Step 2 — Confirm with higher_timeframe direction and key_levels (support, resistance, order blocks, FVGs).
-Step 3 — Identify the nearest structural entry zone within 1 ATR.
+Step 3 — Identify entry: current level (MARKET) or nearest retest level (LIMIT).
 Step 4 — Set stop beyond the invalidating structure level.
-Step 5 — Set TP1 at nearest opposing level, TP2 at the level beyond that.
-Step 6 — If R:R ≥ 1.2, call LONG or SHORT. If nothing is clean after all steps, call WAIT.
+Step 5 — Set TP1 at nearest opposing level, TP2 beyond it. Use R:R multiples if no clear level.
+Step 6 — Decide order_type: MARKET if price is at entry now, LIMIT if waiting for retest.
+Step 7 — If R:R ≥ 1.2, call LONG or SHORT. If nothing clean after all steps, call WAIT.
 
 ━━━ OUTPUT ━━━
 
@@ -116,9 +128,11 @@ Return ONLY valid JSON, no extra text:
 {
   "decision": "LONG|SHORT|WAIT",
   "confidence": 55-100,
-  "entry": <price or null>,
-  "stop_loss": <price or null>,
-  "take_profit": [<tp1>, <tp2_or_omit>],
+  "order_type": "MARKET|LIMIT",
+  "setup_type": "short_id e.g. fvg_bounce / ob_rejection / liquidity_sweep / range_bottom / ema_cross",
+  "entry": <number>,
+  "stop_loss": <number>,
+  "take_profit": [<tp1_number>, <tp2_number>],
   "reason": "One sentence ≤ 35 words: direction bias + key structure used."
 }"""
 
@@ -367,6 +381,10 @@ class AIAnalyst:
         # symbol -> {direction, entry, stop, tp1, tp2, updated}
         self._active_signals: dict = {}
 
+        # ── Pending limit orders ─────────────────────────────────────────────
+        # list of pending limit signal dicts waiting for price to reach entry
+        self._pending_limits: list = []
+
         # Next scheduled analysis timestamps per symbol (for countdown)
         self._next_analysis_ts: dict = {}  # symbol -> epoch seconds
 
@@ -435,6 +453,88 @@ class AIAnalyst:
         """Return active signal dict for `symbol`, or None."""
         with self._lock:
             return dict(self._active_signals.get(symbol) or {}) or None
+
+    # -----------------------------------------------------------------------
+    # Pending limit order helpers
+    # -----------------------------------------------------------------------
+
+    def add_pending_limit(self, result):
+        """Register a LIMIT signal as a pending order to watch for price hits."""
+        if result.get("signal") not in ("LONG", "SHORT"):
+            return
+        entry = result.get("entry")
+        if entry is None:
+            return
+        order = {
+            "id":         f"{result['symbol']}:{int(time.time())}",
+            "symbol":     result["symbol"],
+            "direction":  result["signal"],
+            "entry":      entry,
+            "stop":       result.get("stop"),
+            "tp1":        result.get("tp1"),
+            "tp2":        result.get("tp2"),
+            "confidence": result.get("confidence", 0),
+            "setup_type": result.get("setup_type", "none"),
+            "reasoning":  result.get("reasoning", ""),
+            "created":    int(time.time()),
+            "triggered":  False,
+        }
+        with self._lock:
+            # Replace any existing pending limit for same symbol+direction to avoid stacking dupes
+            self._pending_limits = [
+                o for o in self._pending_limits
+                if not (o["symbol"] == order["symbol"] and o["direction"] == order["direction"])
+            ]
+            self._pending_limits.append(order)
+        log.info("[limit] Pending %s LIMIT added for %s @ %.4f",
+                 order["direction"], order["symbol"], entry)
+
+    def get_pending_limits(self, symbol=None):
+        """Return list of pending limit orders, optionally filtered by symbol."""
+        with self._lock:
+            if symbol:
+                return [dict(o) for o in self._pending_limits if o["symbol"] == symbol]
+            return [dict(o) for o in self._pending_limits]
+
+    def check_and_trigger_limits(self, symbol, price):
+        """Check if current price has hit any pending limit orders.
+        Returns list of triggered orders (removed from pending)."""
+        triggered = []
+        with self._lock:
+            remaining = []
+            for order in self._pending_limits:
+                if order["symbol"] != symbol:
+                    remaining.append(order)
+                    continue
+                entry     = order["entry"]
+                direction = order["direction"]
+                stop      = order.get("stop")
+                # Trigger: LONG when price drops to/below entry; SHORT when price rises to/above entry
+                hit = (direction == "LONG" and price <= entry) or \
+                      (direction == "SHORT" and price >= entry)
+                # Expire: price blew through the stop before the limit entry was reached
+                expired = False
+                if stop and not hit:
+                    if direction == "LONG" and price < stop:
+                        expired = True
+                        log.info("[limit] %s LONG limit expired (price %.4f < stop %.4f)",
+                                 symbol, price, stop)
+                    elif direction == "SHORT" and price > stop:
+                        expired = True
+                        log.info("[limit] %s SHORT limit expired (price %.4f > stop %.4f)",
+                                 symbol, price, stop)
+                if hit:
+                    order = dict(order)
+                    order["triggered"]     = True
+                    order["trigger_price"] = price
+                    order["trigger_time"]  = int(time.time())
+                    triggered.append(order)
+                    log.info("[limit] %s %s LIMIT triggered at %.4f (target entry %.4f)",
+                             symbol, direction, price, entry)
+                elif not expired:
+                    remaining.append(order)
+            self._pending_limits = remaining
+        return triggered
 
     def get_next_analysis_ts(self, symbol):
         with self._lock:
@@ -695,6 +795,7 @@ class AIAnalyst:
             "model":            None,
             "signal":           "WAIT",
             "direction":        None,
+            "order_type":       "MARKET",
             "setup_type":       "none",
             "confidence":       0,
             "entry":            None,
@@ -789,6 +890,12 @@ class AIAnalyst:
         if signal not in ("LONG", "SHORT", "WAIT"):
             signal = "WAIT"
 
+        order_type = str(out.get("order_type", "MARKET")).upper()
+        if order_type not in ("MARKET", "LIMIT"):
+            order_type = "MARKET"
+
+        setup_type_raw = str(out.get("setup_type") or "").strip().lower() or "none"
+
         def num(v):
             try:
                 return round(float(v), 8) if v is not None else None
@@ -803,6 +910,18 @@ class AIAnalyst:
 
         entry = num(out.get("entry"))
         stop  = num(out.get("stop_loss"))
+
+        # Fallback TP calculation when the AI omits or returns null take_profit
+        if entry is not None and stop is not None and signal in ("LONG", "SHORT"):
+            risk = abs(entry - stop)
+            sign = 1 if signal == "LONG" else -1
+            if tp1 is None and risk > 0:
+                tp1 = round(entry + sign * risk * 1.5, 8)
+                log.info("[ai] tp1 fallback for %s: %.6f", symbol, tp1)
+            if tp2 is None and risk > 0:
+                tp2 = round(entry + sign * risk * 3.0, 8)
+                log.info("[ai] tp2 fallback for %s: %.6f", symbol, tp2)
+
         risk_reward = None
         if entry is not None and stop is not None and tp1 is not None and abs(entry - stop) > 0:
             risk_reward = round(abs(tp1 - entry) / abs(entry - stop), 2)
@@ -820,12 +939,14 @@ class AIAnalyst:
             "provider":         provider,
             "signal":           signal,
             "direction":        signal if signal in ("LONG", "SHORT") else None,
-            "setup_type":       "none",
+            "order_type":       order_type,
+            "setup_type":       setup_type_raw,
             "confidence":       max(0, min(100, int(out.get("confidence") or 0))),
             "entry":            entry,
             "stop":             stop,
             "tp1":              tp1,
             "tp2":              tp2,
+            "limit_entry":      entry if order_type == "LIMIT" else None,
             "risk_reward":      risk_reward,
             "orderflow_read":   "",
             "reasoning":        str(out.get("reason") or "")[:600],
@@ -893,9 +1014,13 @@ class AIAnalyst:
                 })
                 self._recent_ai_signals = self._recent_ai_signals[:20]
 
-            # Lock further AI analysis until signal resolves
+            # Lock further AI analysis until signal resolves (MARKET only)
+            # LIMIT signals are tracked as pending orders, not active locks
             if getattr(config, "ACTIVE_SIGNAL_LOCK", True):
-                self._record_active_signal(symbol, result)
+                if result.get("order_type", "MARKET") == "MARKET":
+                    self._record_active_signal(symbol, result)
+                elif result.get("order_type") == "LIMIT":
+                    self.add_pending_limit(result)
 
         with self._lock:
             self._cache[symbol] = result

@@ -259,6 +259,24 @@ class StreamManager:
                 if c.market() == key:
                     c.send(payload)
             self._broadcast_new_signals()
+            # Check pending LIMIT order triggers on each analysis cycle
+            try:
+                from ai_analyst import ai_analyst as _ai
+                if getattr(config, "LIMIT_SIGNALS_ENABLED", True):
+                    price     = analysis["price"]
+                    triggered = _ai.check_and_trigger_limits(symbol, price)
+                    for order in triggered:
+                        trig_payload = {"type": "limit_triggered", "data": order}
+                        for c in self.clients:
+                            c.send(trig_payload)
+                    if triggered:
+                        updated     = _ai.get_pending_limits(symbol)
+                        upd_payload = {"type": "pending_limits", "data": updated}
+                        for c in self.clients:
+                            if c.symbol == symbol:
+                                c.send(upd_payload)
+            except Exception:
+                pass
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001

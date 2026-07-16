@@ -737,6 +737,67 @@ select:hover { border-color: #38bdf8; }
 .toast-dir  { font-size: .88rem; }
 .toast-meta { font-size: .72rem; color: #94a3b8; font-weight: 400; }
 
+/* ── MARKET / LIMIT order badges ────────────────────────────────────────── */
+.badge-market {
+  display: inline-block; font-size: .6rem; font-weight: 700; letter-spacing: .07em;
+  padding: 1px 5px; border-radius: 3px; vertical-align: middle;
+  background: rgba(56,189,248,.15); color: #38bdf8;
+  border: 1px solid rgba(56,189,248,.3);
+}
+.badge-limit {
+  display: inline-block; font-size: .6rem; font-weight: 700; letter-spacing: .07em;
+  padding: 1px 5px; border-radius: 3px; vertical-align: middle;
+  background: rgba(245,158,11,.15); color: #f59e0b;
+  border: 1px solid rgba(245,158,11,.3);
+}
+.badge-triggered {
+  display: inline-block; font-size: .6rem; font-weight: 700; letter-spacing: .07em;
+  padding: 1px 5px; border-radius: 3px; vertical-align: middle;
+  background: rgba(34,197,94,.2); color: #22c55e;
+  border: 1px solid rgba(34,197,94,.3);
+  animation: triggered-flash .6s ease;
+}
+@keyframes triggered-flash {
+  0%,100% { box-shadow: none; }
+  40%      { box-shadow: 0 0 12px rgba(34,197,94,.5); }
+}
+
+/* ── Pending Limit Orders section ───────────────────────────────────────── */
+#pending-limits-card .empty { font-size: .82rem; color: #374151; padding: 4px 0; }
+#pending-limits-list { display: flex; flex-direction: column; gap: 10px; }
+
+.pending-limit-row {
+  padding: 12px 14px; border-radius: 8px;
+  border: 1px solid transparent;
+  border-left: 3px solid #f59e0b;
+  background: rgba(245,158,11,.05);
+  display: flex; flex-direction: column; gap: 6px;
+}
+.pending-limit-row.long  { border-left-color: #22c55e; background: rgba(34,197,94,.05); }
+.pending-limit-row.short { border-left-color: #ef4444; background: rgba(239,68,68,.05); }
+
+.pl-left {
+  display: flex; align-items: center; gap: 8px;
+}
+.pl-dir {
+  font-size: .88rem; font-weight: 700;
+}
+.pl-dir.long  { color: #22c55e; }
+.pl-dir.short { color: #ef4444; }
+.pl-sym {
+  font-size: .75rem; font-weight: 600; color: #38bdf8;
+  background: rgba(56,189,248,.1); padding: 1px 6px; border-radius: 3px;
+}
+.pl-levels {
+  display: flex; flex-wrap: wrap; gap: 12px;
+}
+.pl-kv { display: flex; align-items: center; gap: 5px; }
+.pl-k  { font-size: .68rem; color: #4b5563; text-transform: uppercase; letter-spacing: .05em; }
+.pl-v  { font-size: .82rem; font-weight: 600; color: #94a3b8; }
+.pl-meta {
+  font-size: .72rem; color: #4b5563; line-height: 1.4;
+}
+
 /* ── footer ─────────────────────────────────────────────────────────────── */
 .disclaimer { font-size: .68rem; color: #374151; text-align: center; line-height: 1.6; }
 

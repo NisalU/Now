@@ -88,3 +88,6 @@ AI_JSON_FAIL_COOLDOWN = 30
 AI_PROMPT_CANDLES = 6
 AI_PROMPT_CVD_POINTS = 12
 AI_PROMPT_MEMORY_ROWS = 3
+
+# ---- Limit signals ----
+LIMIT_SIGNALS_ENABLED = True   # track LIMIT order signals and alert when price hits them

@@ -159,6 +159,13 @@ async def api_pipeline_events(_request: web.Request) -> web.Response:
     })
 
 
+async def api_pending_limits(request: web.Request) -> web.Response:
+    """Return pending LIMIT order signals (waiting for price to reach entry)."""
+    symbol = request.query.get("symbol")
+    limits = ai_analyst.get_pending_limits(symbol)
+    return web.json_response({"pending": limits})
+
+
 async def api_signal_status(request: web.Request) -> web.Response:
     """Active-signal lock status for each symbol."""
     symbol = request.query.get("symbol")
@@ -217,6 +224,7 @@ async def ws_endpoint(request: web.Request) -> web.WebSocketResponse:
             client.send({"type": "engine_status",    "data": ai_analyst.get_status()})
             client.send({"type": "ai_signals_table", "data": ai_analyst.get_recent_signals()})
             client.send({"type": "pipeline_log",     "data": ai_analyst.get_pipeline_log()[:40]})
+            client.send({"type": "pending_limits",   "data": ai_analyst.get_pending_limits(client.symbol)})
             # Send countdown for default symbol
             _push_countdown(client, client.symbol)
         manager.add_client(client)
@@ -259,6 +267,7 @@ async def ws_endpoint(request: web.Request) -> web.WebSocketResponse:
                         client.send({"type": "engine_status",    "data": ai_analyst.get_status()})
                         client.send({"type": "ai_signals_table", "data": ai_analyst.get_recent_signals()})
                         client.send({"type": "pipeline_log",     "data": ai_analyst.get_pipeline_log()[:40]})
+                        client.send({"type": "pending_limits",   "data": ai_analyst.get_pending_limits(sym)})
 
             elif kind == "ping":
                 # Application-level ping → pong with echo timestamp
@@ -387,11 +396,13 @@ async def _ai_loop() -> None:
             status_payload   = {"type": "engine_status",    "data": ai_analyst.get_status()}
             signals_payload  = {"type": "ai_signals_table", "data": ai_analyst.get_recent_signals()}
             pipeline_payload = {"type": "pipeline_log",     "data": ai_analyst.get_pipeline_log()[:40]}
+            limits_payload   = {"type": "pending_limits",   "data": ai_analyst.get_pending_limits(symbol)}
 
             for c in manager.clients:
                 if c.symbol == symbol:
                     c.send(ai_payload)
                     c.send(pipeline_payload)
+                    c.send(limits_payload)
                 c.send(status_payload)
                 c.send(signals_payload)
 
@@ -448,6 +459,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/binance-key-status", api_binance_key_status)
     app.router.add_get("/api/pipeline-events",    api_pipeline_events)
     app.router.add_get("/api/signal-status",      api_signal_status)
+    app.router.add_get("/api/pending-limits",     api_pending_limits)
     app.router.add_get("/ws",                     ws_endpoint)
     app.router.add_static("/static", BASE_DIR / "static", name="static")
     app.on_startup.append(on_startup)
