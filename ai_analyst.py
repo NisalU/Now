@@ -11,7 +11,7 @@ Pipeline (no regime or trade-quality gates — every bar gets a full AI read):
         -> Signal memory write
 
 Provider priority:
-    1. Groq  (GROQ_API_KEY) — fast, high-quality; rate-limited on free tier
+    1. OpenRouter (OPENROUTER_API_KEY) — free tier with automatic model cycling
     2. OpenRouter free models (OPENROUTER_API_KEY) — automatic fallback on
        Groq 429.  Uses SYSTEM_PROMPT_ENHANCED, a more directive prompt tuned
        for smaller/weaker models to still produce valid, conservative JSON.
@@ -40,7 +40,6 @@ log = logging.getLogger("ai_analyst")
 # ---------------------------------------------------------------------------
 # Provider URLs
 # ---------------------------------------------------------------------------
-GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # ---------------------------------------------------------------------------
@@ -48,24 +47,19 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 # ---------------------------------------------------------------------------
 
 # Groq models — tried in order; first that responds is cached for the session.
-GROQ_MODELS = [
-    os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
-    "llama-3.3-70b-versatile",
-    "llama-3.1-70b-versatile",
-    "llama-3.1-8b-instant",
-]
-
-# OpenRouter free models — tried in order when Groq is rate-limited (429).
-# SYSTEM_PROMPT_ENHANCED is used instead of SYSTEM_PROMPT for these models.
+# OpenRouter free models — tried in order; first success is cached for session.
+# When a model returns 429 it is individually rate-limited for MODEL_RL_COOLDOWN
+# seconds and the next one is tried automatically.
 OPENROUTER_FREE_MODELS = [
     m for m in [
-        os.environ.get("OPENROUTER_MODEL", ""),
-        "meta-llama/llama-3.3-70b-instruct:free",
-        "qwen/qwen3-235b-a22b:free",
-        "nousresearch/hermes-3-llama-3.1-405b:free",
-        "meta-llama/llama-3.1-70b-instruct:free",
-        "mistralai/mistral-7b-instruct:free",
-        "google/gemma-2-9b-it:free",
+        os.environ.get("OPENROUTER_MODEL", ""),   # user-pinned model (highest priority)
+        "meta-llama/llama-3.3-70b-instruct:free", # best free general model
+        "deepseek/deepseek-r1-0528:free",          # strong chain-of-thought reasoning
+        "google/gemini-2.0-flash-thinking-exp:free", # fast + smart
+        "qwen/qwen3-235b-a22b:free",               # very large model
+        "microsoft/phi-4-reasoning-plus:free",     # strong reasoning
+        "meta-llama/llama-3.1-70b-instruct:free",  # reliable fallback
+        "mistralai/mistral-7b-instruct:free",      # lightweight fallback
     ] if m
 ]
 
@@ -597,24 +591,6 @@ If the input signal is already WAIT, approve it — WAIT never needs defending."
 # Key helpers
 # ---------------------------------------------------------------------------
 
-def _get_api_key():
-    """Read GROQ_API_KEY from env or local .env file."""
-    key = os.environ.get("GROQ_API_KEY", "").strip()
-    if key:
-        return key
-    base = os.path.dirname(__file__)
-    for name in (".env", ".env.local", ".env.development.local"):
-        try:
-            with open(os.path.join(base, name)) as fh:
-                for line in fh:
-                    line = line.strip()
-                    if line.startswith("GROQ_API_KEY="):
-                        return line.split("=", 1)[1].strip().strip('"').strip("'")
-        except OSError:
-            continue
-    return ""
-
-
 def _get_openrouter_key():
     """Read OPENROUTER_API_KEY from env or local .env file."""
     key = os.environ.get("OPENROUTER_API_KEY", "").strip()
@@ -792,11 +768,8 @@ class AIAnalyst:
     def __init__(self):
         self._lock = threading.Lock()
         self._cache = {}          # symbol -> ai result dict
-        self._model = None        # first working Groq model, cached for session
-        self._or_model = None     # first working OpenRouter model, cached for session
-        self._groq_rate_limited = False   # flip to True on 429; reset after 5 min
-        self._groq_rl_until = 0.0         # epoch time when Groq cooldown expires
-        self.enabled = bool(_get_api_key() or _get_openrouter_key())
+        self._or_model = None     # last successful OpenRouter model (tried first next run)
+        self.enabled = bool(_get_openrouter_key())
         self.last_error = None
 
         # Engine status metrics
@@ -805,12 +778,10 @@ class AIAnalyst:
         self._inference_window = deque(maxlen=120)  # timestamps for rate calculation
         self._active_models = set()     # models that have responded this session
 
-        # Per-model individual rate-limit tracking (separate from global Groq RL).
-        # Groq can rate-limit a specific model while others still work.
+        # Per-model individual rate-limit tracking.
         # Key: model name  Value: epoch time when individual cooldown expires
         self._model_rl_until: dict = {}
-        _MODEL_RL_SECONDS = 90          # individual model cooldown (90 s)
-        self._MODEL_RL_SECONDS = _MODEL_RL_SECONDS
+        self._MODEL_RL_SECONDS = getattr(config, "MODEL_RL_COOLDOWN", 90)
 
         # Pipeline event log — ring-buffer pushed to the dashboard after each run.
         self._pipeline_events: deque = deque(
@@ -853,27 +824,21 @@ class AIAnalyst:
             recent = [t for t in self._inference_window if now - t < 60]
             rate_per_min = len(recent)
             signals = list(self._recent_ai_signals)
-            cur_model = self._model or self._or_model
-            groq_rl = self._groq_rate_limited and now < self._groq_rl_until
-            cooldown_remaining = max(0, int(self._groq_rl_until - now)) if groq_rl else 0
-
-        # Infer provider from model name: OpenRouter models contain a "/"
-        if cur_model:
-            provider = "openrouter" if "/" in cur_model else "groq"
-        else:
-            provider = None
+            cur_model = self._or_model
+            # Collect any models currently in individual rate-limit cooldown
+            rl_models = {m: round(until - now) for m, until in self._model_rl_until.items()
+                         if until > now}
 
         return {
             "online": self.enabled,
-            "version": "v4.3",
-            "active_models": len(config.WEIGHTS),  # strategy model count (10)
+            "version": "v4.4",
+            "provider": "openrouter",
+            "active_models": len(config.WEIGHTS),  # strategy count (10)
             "latency_ms": self._last_latency,
             "inference_per_min": rate_per_min,
             "total_inferences": self._inference_count,
             "current_model": cur_model,
-            "provider": provider,
-            "groq_rate_limited": groq_rl,
-            "groq_cooldown_remaining": cooldown_remaining,
+            "rate_limited_models": rl_models,
             "last_error": self.last_error,
             "recent_signals": signals,
         }
@@ -937,179 +902,78 @@ class AIAnalyst:
             raise RuntimeError(f"MODEL_ERROR:{model}: {resp.status_code} {resp.text[:80]}")
         raise RuntimeError(f"HTTP_ERROR:{model}: {resp.status_code} {resp.text[:160]}")
 
-    def _call_groq_models(self, system_prompt, payload_text):
-        """Try each Groq model in order.
-        Returns (model, content) on success.
-        Raises RuntimeError('RATE_LIMIT:...') if ALL tried models returned 429.
-        Raises RuntimeError with details if all failed for other reasons.
-        """
-        key = _get_api_key()
-        if not key:
-            raise RuntimeError("GROQ_API_KEY not set")
-        headers = {
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-        }
-        models = [self._model] if self._model else []
-        models += [m for m in GROQ_MODELS if m and m not in models]
-
-        # Skip models that are still in their individual rate-limit cooldown.
-        # This avoids burning an API call on a model we already know is limited.
-        now_t = time.time()
-        active_models = [m for m in models if now_t >= self._model_rl_until.get(m, 0)]
-        skipped = [m for m in models if m not in active_models]
-        if skipped:
-            log.info("Skipping individually rate-limited Groq models: %s", skipped)
-        if not active_models:
-            # Every model is in cooldown — raise global RATE_LIMIT to trigger OpenRouter.
-            raise RuntimeError("RATE_LIMIT:all Groq models are individually rate-limited")
-        models = active_models
-
-        last_exc = None
-        all_rate_limited = True
-        for model in models:
-            try:
-                self._record_evt(stage="model_attempt", provider="groq", model=model)
-                result = self._post_model(GROQ_URL, headers, model, system_prompt, payload_text)
-                # Success — cache this model and clear its individual cooldown.
-                self._model = model
-                self._model_rl_until.pop(model, None)
-                self._active_models.add(model)
-                self._record_evt(stage="model_success", provider="groq", model=model)
-                return result
-            except RuntimeError as e:
-                msg = str(e)
-                last_exc = e
-                if msg.startswith("RATE_LIMIT:"):
-                    # Mark this specific model as rate-limited for a short window.
-                    self._model_rl_until[model] = time.time() + self._MODEL_RL_SECONDS
-                    # If this was our cached preferred model, clear it so we
-                    # don't keep hitting it on every subsequent call.
-                    if self._model == model:
-                        self._model = None
-                    self._record_evt(
-                        stage="model_rate_limited", provider="groq", model=model,
-                        message=f"Rate limited — trying next model",
-                        cooldown_s=self._MODEL_RL_SECONDS,
-                    )
-                    log.warning("Groq rate limit on %s — trying next model", model)
-                    continue  # try next Groq model
-                else:
-                    all_rate_limited = False
-                    if msg.startswith("MODEL_ERROR:"):
-                        self._record_evt(stage="model_error", provider="groq", model=model, message=msg[:120])
-                        continue  # model gone, try next
-                    raise  # HTTP_ERROR or other — surface immediately
-            except requests.RequestException as e:
-                last_exc = e
-                all_rate_limited = False
-                continue
-
-        if all_rate_limited:
-            raise RuntimeError(f"RATE_LIMIT:all Groq models rate-limited: {last_exc}")
-        raise RuntimeError(f"all Groq models failed: {last_exc}")
-
     def _call_openrouter_models(self, system_prompt, payload_text):
-        """Try each OpenRouter free model in order.
-        Returns (model, content) on success.
-        Raises RuntimeError if all fail.
+        """Try each OpenRouter model in order, skipping rate-limited ones.
+
+        Uses per-model cooldown tracking so a 429 on one model doesn't block
+        the others.  The last successful model is cached and tried first next
+        time.  Returns (model_name, content_str) on success.
         """
         key = _get_openrouter_key()
         if not key:
-            raise RuntimeError("OPENROUTER_API_KEY not set")
+            raise RuntimeError(
+                "OPENROUTER_API_KEY not set — add it to your .env file. "
+                "Get a free key at https://openrouter.ai"
+            )
         headers = {
             "Authorization": f"Bearer {key}",
             "Content-Type": "application/json",
             "HTTP-Referer": "https://github.com/NisalU/Now",
             "X-Title": "AI Trading Signal Bot",
         }
-        models = [self._or_model] if self._or_model else []
-        models += [m for m in OPENROUTER_FREE_MODELS if m and m not in models]
+
+        # Build ordered candidate list: cached winner → rest
+        candidates = [self._or_model] if self._or_model else []
+        candidates += [m for m in OPENROUTER_FREE_MODELS if m and m not in candidates]
+
+        # Skip models still in individual rate-limit cooldown
+        now_t = time.time()
+        models = [m for m in candidates if now_t >= self._model_rl_until.get(m, 0)]
+        skipped = [m for m in candidates if m not in models]
+        if skipped:
+            log.info("Skipping rate-limited OpenRouter models: %s", skipped)
+        if not models:
+            raise RuntimeError("RATE_LIMIT:all OpenRouter models are individually rate-limited")
 
         last_exc = None
         for model in models:
             try:
+                self._record_evt(stage="model_attempt", provider="openrouter", model=model)
                 result = self._post_model(
                     OPENROUTER_URL, headers, model, system_prompt, payload_text, timeout=60
                 )
+                # Success — cache and clear individual cooldown
                 self._or_model = model
+                self._model_rl_until.pop(model, None)
                 self._active_models.add(model)
-                log.info("OpenRouter fallback succeeded with model: %s", model)
+                self._record_evt(stage="model_success", provider="openrouter", model=model)
+                log.info("OpenRouter success: model=%s", model)
                 return result
             except RuntimeError as e:
                 msg = str(e)
                 last_exc = e
                 if msg.startswith("RATE_LIMIT:") or msg.startswith("MODEL_ERROR:"):
-                    log.warning("OpenRouter model %s failed (%s), trying next", model, msg[:60])
+                    self._model_rl_until[model] = time.time() + self._MODEL_RL_SECONDS
+                    if self._or_model == model:
+                        self._or_model = None   # stop hitting this model next call
+                    self._record_evt(
+                        stage="model_rate_limited", provider="openrouter", model=model,
+                        message="Rate limited — trying next model",
+                        cooldown_s=self._MODEL_RL_SECONDS,
+                    )
+                    log.warning("OpenRouter rate limit on %s — trying next", model)
                     continue
-                raise
+                raise  # HTTP_ERROR or other — surface immediately
             except requests.RequestException as e:
                 last_exc = e
+                log.warning("OpenRouter request error for %s: %s", model, e)
                 continue
 
-        raise RuntimeError(f"all OpenRouter models failed: {last_exc}")
+        raise RuntimeError(f"RATE_LIMIT:all OpenRouter models failed: {last_exc}")
 
-    def _call_groq_with_prompt(self, system_prompt, payload_text):
-        """Route AI call: Groq first, OpenRouter free models as fallback on rate-limit.
-
-        When Groq is rate-limited the enhanced prompt (SYSTEM_PROMPT_ENHANCED)
-        is used for OpenRouter instead of the caller's system_prompt, unless
-        the caller itself is already using SYSTEM_PROMPT_ENHANCED (e.g. the
-        critic passing its own prompt — in that case we use the passed prompt).
-        Returns (model_name, content_str).
-        """
-        now = time.time()
-        groq_ok = not self._groq_rate_limited or now >= self._groq_rl_until
-
-        if groq_ok and _get_api_key():
-            try:
-                result = self._call_groq_models(system_prompt, payload_text)
-                # Successful Groq call — clear any previous global rate-limit flag.
-                if self._groq_rate_limited:
-                    self._record_evt(stage="provider_recovered", provider="groq",
-                                     message="Groq recovered — back on primary provider")
-                self._groq_rate_limited = False
-                return result
-            except RuntimeError as e:
-                if str(e).startswith("RATE_LIMIT:"):
-                    log.warning(
-                        "Groq rate-limited across all models — falling back to OpenRouter "
-                        "for the next %d seconds", config.GROQ_RATE_LIMIT_COOLDOWN
-                    )
-                    self._groq_rate_limited = True
-                    self._groq_rl_until = now + config.GROQ_RATE_LIMIT_COOLDOWN
-                    self._record_evt(
-                        stage="provider_fallback", from_provider="groq",
-                        to_provider="openrouter",
-                        message=f"All Groq models rate-limited — switching to OpenRouter for {config.GROQ_RATE_LIMIT_COOLDOWN}s",
-                        cooldown_s=config.GROQ_RATE_LIMIT_COOLDOWN,
-                    )
-                    # Fall through to OpenRouter below.
-                else:
-                    raise
-
-        # OpenRouter fallback — use enhanced prompt for the primary analyst,
-        # keep the caller's prompt for the critic (it's already very concise).
-        or_key = _get_openrouter_key()
-        if not or_key:
-            raise RuntimeError(
-                "Groq rate-limited and OPENROUTER_API_KEY is not set. "
-                "Add your OpenRouter key to use the free-model fallback."
-            )
-
-        self._record_evt(stage="provider_fallback_active", provider="openrouter",
-                         cooldown_remaining=max(0, int(self._groq_rl_until - time.time())))
-
-        # Use enhanced prompt for primary analyst; keep original for critic.
-        or_prompt = (
-            SYSTEM_PROMPT_ENHANCED
-            if system_prompt == SYSTEM_PROMPT
-            else system_prompt
-        )
-        return self._call_openrouter_models(or_prompt, payload_text)
-
-    def _call_groq(self, payload_text):
-        return self._call_groq_with_prompt(SYSTEM_PROMPT, payload_text)
+    def _call_ai(self, payload_text):
+        """Primary AI analyst call — OpenRouter with automatic model cycling."""
+        return self._call_openrouter_models(SYSTEM_PROMPT, payload_text)
 
     # -----------------------------------------------------------------------
     # Risk gate
@@ -1190,7 +1054,7 @@ class AIAnalyst:
             },
         }
         try:
-            _, raw = self._call_groq_with_prompt(
+            _, raw = self._call_openrouter_models(
                 CRITIC_PROMPT,
                 "Review this proposed trade call against its market context:\n"
                 + json.dumps(review_payload, separators=(",", ":")),
@@ -1307,7 +1171,7 @@ class AIAnalyst:
             + json.dumps(market, separators=(",", ":"))
         )
         t0 = time.time()
-        model, raw = self._call_groq(user_text)
+        model, raw = self._call_ai(user_text)
         latency_ms = int((time.time() - t0) * 1000)
 
         # Infer provider from model name: OpenRouter models contain a "/"

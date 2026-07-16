@@ -72,40 +72,35 @@ WEIGHTS = {
     "fundamentals": 6,
 }
 
-SIGNAL_THRESHOLD = 45       # |composite| >= threshold fires a LONG/SHORT signal
-STRONG_THRESHOLD = 65       # strong signal label
+SIGNAL_THRESHOLD = 20       # |composite| >= threshold fires a LONG/SHORT signal
+STRONG_THRESHOLD = 45       # strong signal label
 MAX_SIGNAL_HISTORY = 200    # kept in memory / persisted to signals.json
 ENGINE_SIGNAL_FEED = False  # False: dashboard feed shows AI trade calls only;
                             # engine signals are still computed and persisted internally
 
-# ---- Groq AI analyst (discretionary structure/liquidity read) ----
-# Requires GROQ_API_KEY in the environment or a local .env file.
-# Set GROQ_MODEL to override the default model.
+# ---- OpenRouter AI analyst (discretionary structure/liquidity read) ----
+# Requires OPENROUTER_API_KEY in the environment or a local .env file.
+# Set OPENROUTER_MODEL to pin a specific model (overrides the priority list).
 AI_INTERVAL = "1h"          # primary chart the AI analyst monitors
 AI_HTF_INTERVAL = "4h"      # higher-timeframe chart used for top-down context
-AI_REFRESH_SECONDS = 120    # how often the AI re-analyzes each active symbol
+AI_REFRESH_SECONDS = 60     # how often the AI re-analyzes each active symbol
 
 # Server-side risk gate — arithmetic checks only (entry/stop/tp1 validity,
 # minimum R:R, entry-not-chasing). Market regime and trade quality are passed
 # to the AI as *context* but do NOT block or filter any signal.
-AI_MIN_RISK_REWARD = 1.8        # reject any LONG/SHORT below this R:R to TP1
+AI_MIN_RISK_REWARD = 1.2        # reject any LONG/SHORT below this R:R to TP1
 AI_MAX_ENTRY_ATR_DISTANCE = 2.5  # reject entries this many ATRs from live price (chase guard)
 
-# ---- OpenRouter fallback (automatic on Groq 429) ----
-# When Groq returns a rate-limit error (HTTP 429), the bot automatically
-# falls back to OpenRouter free models.
+# ---- OpenRouter model priority list ----
+# Models are tried in order.  When a model returns 429 it is skipped for
+# MODEL_RL_COOLDOWN seconds and the next one is tried automatically.
+# The last successful model is cached and tried first on the next run.
 #
 # Setup:
 #   1. Get a free key at https://openrouter.ai
 #   2. Add to your .env file:  OPENROUTER_API_KEY=sk-or-v1-...
 #   3. Optionally pin a specific model:  OPENROUTER_MODEL=meta-llama/llama-3.3-70b-instruct:free
-#
-# The fallback uses SYSTEM_PROMPT_ENHANCED — a more directive, stricter prompt
-# tuned for smaller/weaker models to still produce valid, conservative JSON calls.
-#
-# After a Groq rate-limit, the bot stays on OpenRouter for this many seconds
-# before retrying Groq (avoids hammering Groq while cooldown is active).
-GROQ_RATE_LIMIT_COOLDOWN = 300  # seconds (5 minutes)
+MODEL_RL_COOLDOWN = 90      # seconds to skip a rate-limited model before retrying
 
 # ---- Market regime (informational context only — not a gate) ----
 # These thresholds drive the regime classifier whose output is passed to the AI

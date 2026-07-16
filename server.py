@@ -239,9 +239,25 @@ async def _push_ai_charts(symbol: str, ai_result: dict):
 
 
 # ---------------- AI analyst loop ----------------
+async def _status_loop():
+    """Push engine status to all clients every 30 s between AI runs so the
+    dashboard widgets (latency, inference rate, model) stay live without
+    requiring a manual refresh."""
+    while True:
+        await asyncio.sleep(30)
+        try:
+            status = ai_analyst.get_status()
+            for c in manager.clients:
+                c.send({"type": "engine_status", "data": status})
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+
+
 async def _ai_loop():
-    """Periodically run the Groq analyst for active symbols and push results
-    to connected clients, including live engine status and signals table."""
+    """Periodically run the OpenRouter AI analyst for active symbols and push
+    results to connected clients, including live engine status and signals."""
     while True:
         try:
             symbols = {c.symbol for c in manager.clients}
@@ -271,8 +287,9 @@ async def _ai_loop():
 async def on_startup(app: web.Application):
     manager.start()
     if ai_analyst.enabled:
-        app["ai_task"] = asyncio.create_task(_ai_loop())
-        print("[ai] Groq order-flow analyst enabled — no regime/quality gates active")
+        app["ai_task"]     = asyncio.create_task(_ai_loop())
+        app["status_task"] = asyncio.create_task(_status_loop())
+        print("[ai] OpenRouter AI analyst enabled — auto model cycling active")
     else:
         print("[ai] GROQ_API_KEY not set — AI analysis disabled")
     if config.BINANCE_API_KEY:
@@ -282,11 +299,12 @@ async def on_startup(app: web.Application):
 
 
 async def on_cleanup(app: web.Application):
-    task = app.get("ai_task")
-    if task:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+    for key in ("ai_task", "status_task"):
+        task = app.get(key)
+        if task:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
     await manager.stop()
 
 
