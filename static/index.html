@@ -153,7 +153,10 @@
     <section class="card" id="ai-signals-table-card">
       <div class="card-head">
         <h2>Recent AI Signals</h2>
-        <span class="sig-count" id="sig-count"></span>
+        <div class="table-controls">
+          <span class="sig-count" id="sig-count"></span>
+          <button class="sig-filter-btn" id="sig-filter-btn" title="Toggle between all symbols and current symbol">All symbols</button>
+        </div>
       </div>
       <div class="ai-sig-table-wrap">
         <table class="ai-sig-table">
@@ -161,14 +164,14 @@
             <tr>
               <th>Time</th>
               <th>Symbol</th>
-              <th>Signal</th>
+              <th>Setup</th>
               <th>Direction</th>
               <th>Confidence</th>
             </tr>
           </thead>
           <tbody id="ai-sig-tbody">
             <tr class="ai-sig-empty">
-              <td colspan="5">No AI signals yet — watching for high-quality setups&hellip;</td>
+              <td colspan="5">No AI signals yet &mdash; watching for high-quality setups&hellip;</td>
             </tr>
           </tbody>
         </table>
