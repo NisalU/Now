@@ -49,7 +49,7 @@ GEMINI_MODELS = [
         "gemini-2.0-flash",                  # fast, capable, generous free tier
         "gemini-2.0-flash-lite",             # lighter fallback
         "gemini-1.5-flash",                  # reliable fallback
-        "gemini-1.5-flash-8b",               # smallest / last resort
+        "gemini-1.5-pro",                    # high-quality last resort
     ] if m
 ]
 
@@ -1314,8 +1314,14 @@ class AIAnalyst:
         try:
             return self.analyze(symbol)
         except Exception as e:  # noqa: BLE001
-            self.last_error = str(e)
-            traceback.print_exc()
+            msg = str(e)
+            self.last_error = msg
+            is_rate_limit = msg.startswith("RATE_LIMIT:")
+            if is_rate_limit:
+                # All models are in cooldown — return cached data silently.
+                log.warning("All Gemini models rate-limited for %s — returning cached", symbol)
+            else:
+                traceback.print_exc()
             cached = self.get_cached(symbol)
             if cached:
                 return cached
@@ -1323,7 +1329,7 @@ class AIAnalyst:
                 "symbol": symbol,
                 "interval": config.AI_INTERVAL,
                 "updated": int(time.time()),
-                "error": str(e)[:200],
+                "error": msg[:200],
             }
 
 
