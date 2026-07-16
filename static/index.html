@@ -238,6 +238,17 @@
       <div class="pipe-log" id="pipe-log" aria-live="polite">
         <div class="pipe-log-empty">No calls yet &mdash; log appears when the AI pipeline runs&hellip;</div>
       </div>
+
+      <!-- Live pipeline events — per-stage backend event stream -->
+      <div class="pipe-events-panel">
+        <div class="pipe-events-header">
+          <span class="pipe-events-title">Live Processing Events</span>
+          <span class="pipe-events-count" id="pipe-events-count"></span>
+        </div>
+        <div class="pipe-events-list" id="pipe-events-list">
+          <div class="pev-empty">Events appear here as the AI pipeline runs&hellip;</div>
+        </div>
+      </div>
     </section>
 
     <!-- Trade plan -->

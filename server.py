@@ -89,6 +89,27 @@ async def api_binance_key_status(_request: web.Request) -> web.Response:
     })
 
 
+async def api_pipeline_events(_request: web.Request) -> web.Response:
+    """Return recent AI pipeline events for the live-processing view.
+
+    Each event is a dict with:
+      ts        – Unix timestamp (float, seconds)
+      run_id    – "<symbol>:<epoch>" identifying a single pipeline run
+      stage     – stage name: market_data, memory_context, ai_call,
+                  model_attempt, model_rate_limited, model_success,
+                  model_error, provider_fallback, provider_recovered,
+                  ai_parsed, trade_quality, critic, signal_out, …
+      + stage-specific fields (symbol, model, provider, latency_ms, …)
+
+    Events are newest-first.  Clients should poll every ~5 s or receive
+    events via the WebSocket ``pipeline_log`` push after each AI run.
+    """
+    return web.json_response({
+        "events": ai_analyst.get_pipeline_log(),
+        "active_run": ai_analyst.get_active_run(),
+    })
+
+
 # ---------------- realtime WebSocket ----------------
 async def ws_endpoint(request: web.Request) -> web.WebSocketResponse:
     ws = web.WebSocketResponse(heartbeat=20)
@@ -126,9 +147,10 @@ async def ws_endpoint(request: web.Request) -> web.WebSocketResponse:
             cached_ai = ai_analyst.get_cached(client.symbol)
             if cached_ai:
                 client.send({"type": "ai", "data": cached_ai})
-            # Push initial engine status + recent signals table.
+            # Push initial engine status + recent signals table + pipeline log.
             client.send({"type": "engine_status", "data": ai_analyst.get_status()})
             client.send({"type": "ai_signals_table", "data": ai_analyst.get_recent_signals()})
+            client.send({"type": "pipeline_log", "data": ai_analyst.get_pipeline_log()[:40]})
         manager.add_client(client)
 
         async def push_snapshot(symbol, interval):
@@ -229,9 +251,11 @@ async def _ai_loop():
                 ai_payload = {"type": "ai", "data": result}
                 status_payload = {"type": "engine_status", "data": ai_analyst.get_status()}
                 signals_payload = {"type": "ai_signals_table", "data": ai_analyst.get_recent_signals()}
+                pipeline_payload = {"type": "pipeline_log", "data": ai_analyst.get_pipeline_log()[:40]}
                 for c in manager.clients:
                     if c.symbol == symbol:
                         c.send(ai_payload)
+                        c.send(pipeline_payload)
                     c.send(status_payload)
                     c.send(signals_payload)
                 # Push 15m/1h AI chart data when a signal fires.
@@ -276,6 +300,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/engine-status", api_engine_status)
     app.router.add_get("/api/ai-signals", api_ai_signals)
     app.router.add_get("/api/binance-key-status", api_binance_key_status)
+    app.router.add_get("/api/pipeline-events", api_pipeline_events)
     app.router.add_get("/ws", ws_endpoint)
     app.router.add_static("/static", BASE_DIR / "static", name="static")
     app.on_startup.append(on_startup)

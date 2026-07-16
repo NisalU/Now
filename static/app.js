@@ -1094,6 +1094,149 @@
     while (logEl.children.length > 30) logEl.removeChild(logEl.lastChild);
   }
 
+  /* ═══════════════════════════════════════════════════════════════════════
+     Live Pipeline Events — render backend pipeline_log events
+     These come from the backend's _pipeline_events deque after each run.
+  ═══════════════════════════════════════════════════════════════════════ */
+
+  var _pipeEvtStageOrder = [
+    "market_data","market_data_regime","memory_context",
+    "ai_call","model_attempt","model_rate_limited","model_success","model_error",
+    "provider_fallback","provider_recovered","provider_fallback_active",
+    "ai_parsed","trade_quality","critic","signal_out"
+  ];
+
+  function _pipeEvtIcon(stage) {
+    var icons = {
+      "market_data":            "◈",
+      "market_data_regime":     "◈",
+      "memory_context":         "◇",
+      "ai_call":                "▶",
+      "model_attempt":          "↻",
+      "model_rate_limited":     "⚠",
+      "model_success":          "✓",
+      "model_error":            "✗",
+      "provider_fallback":      "↪",
+      "provider_recovered":     "↩",
+      "provider_fallback_active": "↪",
+      "ai_parsed":              "✓",
+      "trade_quality":          "◆",
+      "critic":                 "◉",
+      "signal_out":             "◎",
+    };
+    return icons[stage] || "·";
+  }
+
+  function _pipeEvtLabel(evt) {
+    var s = evt.stage || "";
+    switch (s) {
+      case "market_data":
+        return evt.status === "fetching" ? "Fetching market data…"
+             : "Market data  ·  price " + (evt.price ? evt.price.toFixed(2) : "—");
+      case "market_data_regime":
+        return "Regime: " + (evt.regime || "—") + "  ·  score " + (evt.composite != null ? evt.composite : "—");
+      case "memory_context":
+        return evt.status === "loading" ? "Loading signal memory…"
+             : "Memory: " + (evt.found || 0) + " similar setup" + (evt.found === 1 ? "" : "s") + " found";
+      case "ai_call":
+        return evt.status === "start" ? "AI call started"
+             : "AI responded  ·  " + (evt.latency_ms || "—") + " ms  ·  " + (evt.model ? evt.model.replace(/:free$/, "") : "—");
+      case "model_attempt":
+        return "Trying model: " + (evt.model || "—");
+      case "model_rate_limited":
+        return "Rate-limited: " + (evt.model || "—") + (evt.cooldown_s ? "  ·  cooldown " + evt.cooldown_s + "s" : "");
+      case "model_success":
+        return "Model OK: " + (evt.model || "—");
+      case "model_error":
+        return "Model error: " + (evt.model || "—");
+      case "provider_fallback":
+        return "All Groq models rate-limited — switching to OpenRouter" +
+               (evt.cooldown_s ? " for " + evt.cooldown_s + "s" : "");
+      case "provider_recovered":
+        return "Groq recovered — back on primary provider";
+      case "provider_fallback_active":
+        return "Using OpenRouter fallback" +
+               (evt.cooldown_remaining ? "  ·  " + evt.cooldown_remaining + "s left" : "");
+      case "ai_parsed":
+        return "Signal: " + (evt.signal || "WAIT") +
+               (evt.confidence ? "  ·  " + evt.confidence + "% conf" : "") +
+               (evt.setup_type && evt.setup_type !== "none" ? "  ·  " + evt.setup_type : "");
+      case "trade_quality":
+        return evt.status === "computing" ? "Computing trade quality…"
+             : "Quality grade: " + (evt.grade || "—");
+      case "critic":
+        if (evt.status === "skipped") return "Critic skipped" + (evt.reason ? " — " + evt.reason : "");
+        if (evt.status === "start")  return "Critic reviewing signal…";
+        return "Critic: " + (evt.approved ? "✓ approved" : "✗ rejected") +
+               (evt.concerns ? "  ·  " + evt.concerns + " concern" + (evt.concerns === 1 ? "" : "s") : "");
+      case "signal_out":
+        return "Signal out: " + (evt.signal || "WAIT") +
+               (evt.confidence ? "  ·  " + evt.confidence + "%" : "") +
+               (evt.latency_ms ? "  ·  " + evt.latency_ms + "ms total" : "") +
+               (evt.gated ? "  ·  (risk-gated)" : "");
+      default:
+        return s.replace(/_/g, " ");
+    }
+  }
+
+  function _pipeEvtCls(evt) {
+    var s = evt.stage || "";
+    if (s === "model_rate_limited" || s === "model_error")  return "pev-warn";
+    if (s === "provider_fallback" || s === "provider_fallback_active") return "pev-warn";
+    if (s === "model_success" || s === "provider_recovered") return "pev-ok";
+    if (s === "signal_out") {
+      if (evt.signal === "LONG")  return "pev-long";
+      if (evt.signal === "SHORT") return "pev-short";
+      return "pev-wait";
+    }
+    if (s === "ai_parsed") {
+      if (evt.signal === "LONG")  return "pev-long";
+      if (evt.signal === "SHORT") return "pev-short";
+    }
+    if (s === "critic" && evt.status === "done") return evt.approved ? "pev-ok" : "pev-warn";
+    return "pev-default";
+  }
+
+  function renderPipelineEvents(events) {
+    var el = document.getElementById("pipe-events-list");
+    if (!el || !events || !events.length) return;
+
+    var countEl = document.getElementById("pipe-events-count");
+    if (countEl) countEl.textContent = events.length + " events";
+
+    // Group events by run_id to identify the latest run
+    var latestRunId = null;
+    events.forEach(function(e) { if (!latestRunId && e.run_id) latestRunId = e.run_id; });
+
+    el.innerHTML = "";
+    var nowS = Date.now() / 1000;
+
+    events.slice(0, 40).forEach(function(evt, i) {
+      var row = document.createElement("div");
+      var isNew = i === 0;
+      var cls = "pev-row " + _pipeEvtCls(evt) + (isNew ? " pev-new" : "");
+      if (evt.run_id === latestRunId) cls += " pev-latest-run";
+      row.className = cls;
+
+      var t = evt.ts
+        ? new Date(evt.ts * 1000).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })
+        : "—";
+      var ageS = evt.ts ? Math.round(nowS - evt.ts) : null;
+      var age  = ageS !== null && ageS >= 0
+        ? (ageS < 5 ? "just now" : ageS < 60 ? ageS + "s ago" : Math.floor(ageS / 60) + "m ago")
+        : "";
+
+      row.innerHTML =
+        '<span class="pev-time" title="' + age + '">' + t + '</span>' +
+        '<span class="pev-icon">' + _pipeEvtIcon(evt.stage) + '</span>' +
+        '<span class="pev-label">' + _pipeEvtLabel(evt) + '</span>' +
+        (age ? '<span class="pev-age">' + age + '</span>' : '');
+
+      el.appendChild(row);
+      if (isNew) setTimeout(function() { row.classList.remove("pev-new"); }, 900);
+    });
+  }
+
   // Init pipeline idle state
   _resetPipeline();
 
@@ -1414,6 +1557,9 @@
           break;
         case "ai_signals_table":
           renderAISignalsTable(m.data);
+          break;
+        case "pipeline_log":
+          renderPipelineEvents(m.data);
           break;
         case "pong":
           latencyEl.textContent = Math.max(1, Math.round(performance.now() - m.t)) + "ms";

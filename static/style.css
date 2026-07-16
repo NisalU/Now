@@ -700,6 +700,101 @@ select:hover { border-color: var(--blue); }
 @keyframes toast-in  { from { opacity: 0; transform: translateX(24px); } to { opacity: 1; transform: translateX(0); } }
 @keyframes toast-out { to   { opacity: 0; transform: translateX(24px); } }
 
+/* ── Live Pipeline Events panel ──────────────────────────────────────────── */
+.pipe-events-panel {
+  margin-top: 14px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+.pipe-events-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.pipe-events-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.pipe-events-count {
+  font-size: 10px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.pipe-events-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 260px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.pev-empty {
+  font-size: 11px;
+  color: var(--muted);
+  padding: 6px 0;
+}
+.pev-row {
+  display: grid;
+  grid-template-columns: 54px 18px 1fr auto;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 11px;
+  padding: 3px 6px;
+  border-radius: 4px;
+  line-height: 1.4;
+  transition: background .2s;
+}
+.pev-row:hover { background: rgba(255,255,255,.03); }
+
+/* Stage colour classes */
+.pev-default .pev-icon  { color: var(--muted); }
+.pev-ok      .pev-icon  { color: var(--green); }
+.pev-warn    .pev-icon  { color: var(--amber); }
+.pev-ok      .pev-label { color: var(--green); }
+.pev-warn    .pev-label { color: var(--amber); }
+.pev-long    .pev-label { color: var(--green); font-weight: 600; }
+.pev-short   .pev-label { color: var(--red);   font-weight: 600; }
+.pev-wait    .pev-label { color: var(--amber); }
+
+/* Highlight the most recent run */
+.pev-latest-run { background: rgba(56,189,248,.04); }
+.pev-latest-run:hover { background: rgba(56,189,248,.07); }
+
+/* New-entry flash */
+.pev-new { animation: pev-flash .9s ease; }
+@keyframes pev-flash {
+  0%   { background: rgba(56,189,248,.18); }
+  100% { background: transparent; }
+}
+
+.pev-time {
+  font-size: 10px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.pev-icon {
+  text-align: center;
+  color: var(--blue);
+  font-size: 11px;
+}
+.pev-label {
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pev-age {
+  font-size: 10px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
 /* ── Footer ──────────────────────────────────────────────────────────────── */
 .disclaimer { font-size: 11px; color: var(--muted); text-align: center; padding: 8px 16px 24px; }
 

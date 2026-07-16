@@ -805,6 +805,19 @@ class AIAnalyst:
         self._inference_window = deque(maxlen=120)  # timestamps for rate calculation
         self._active_models = set()     # models that have responded this session
 
+        # Per-model individual rate-limit tracking (separate from global Groq RL).
+        # Groq can rate-limit a specific model while others still work.
+        # Key: model name  Value: epoch time when individual cooldown expires
+        self._model_rl_until: dict = {}
+        _MODEL_RL_SECONDS = 90          # individual model cooldown (90 s)
+        self._MODEL_RL_SECONDS = _MODEL_RL_SECONDS
+
+        # Pipeline event log — ring-buffer pushed to the dashboard after each run.
+        self._pipeline_events: deque = deque(
+            maxlen=getattr(config, "PIPELINE_LOG_MAX", 100)
+        )
+        self._active_run: dict = {}     # last emitted pipeline stage
+
         # Recent LONG/SHORT signals for the dashboard table (max 20)
         self._recent_ai_signals = []
         self._load_recent_signals_from_db()
@@ -869,6 +882,24 @@ class AIAnalyst:
         with self._lock:
             return list(self._recent_ai_signals)
 
+    def get_pipeline_log(self):
+        """Return recent pipeline events for the dashboard (newest-first)."""
+        with self._lock:
+            return list(reversed(self._pipeline_events))
+
+    def get_active_run(self):
+        """Return the most recently emitted pipeline stage."""
+        with self._lock:
+            return dict(self._active_run)
+
+    def _record_evt(self, **kwargs):
+        """Append a timestamped pipeline event to the ring buffer."""
+        evt = {"ts": round(time.time(), 3), **kwargs}
+        with self._lock:
+            self._pipeline_events.append(evt)
+            self._active_run = evt
+        return evt
+
     # -----------------------------------------------------------------------
     # Low-level HTTP calls
     # -----------------------------------------------------------------------
@@ -922,23 +953,51 @@ class AIAnalyst:
         models = [self._model] if self._model else []
         models += [m for m in GROQ_MODELS if m and m not in models]
 
+        # Skip models that are still in their individual rate-limit cooldown.
+        # This avoids burning an API call on a model we already know is limited.
+        now_t = time.time()
+        active_models = [m for m in models if now_t >= self._model_rl_until.get(m, 0)]
+        skipped = [m for m in models if m not in active_models]
+        if skipped:
+            log.info("Skipping individually rate-limited Groq models: %s", skipped)
+        if not active_models:
+            # Every model is in cooldown — raise global RATE_LIMIT to trigger OpenRouter.
+            raise RuntimeError("RATE_LIMIT:all Groq models are individually rate-limited")
+        models = active_models
+
         last_exc = None
         all_rate_limited = True
         for model in models:
             try:
+                self._record_evt(stage="model_attempt", provider="groq", model=model)
                 result = self._post_model(GROQ_URL, headers, model, system_prompt, payload_text)
+                # Success — cache this model and clear its individual cooldown.
                 self._model = model
+                self._model_rl_until.pop(model, None)
                 self._active_models.add(model)
+                self._record_evt(stage="model_success", provider="groq", model=model)
                 return result
             except RuntimeError as e:
                 msg = str(e)
                 last_exc = e
                 if msg.startswith("RATE_LIMIT:"):
+                    # Mark this specific model as rate-limited for a short window.
+                    self._model_rl_until[model] = time.time() + self._MODEL_RL_SECONDS
+                    # If this was our cached preferred model, clear it so we
+                    # don't keep hitting it on every subsequent call.
+                    if self._model == model:
+                        self._model = None
+                    self._record_evt(
+                        stage="model_rate_limited", provider="groq", model=model,
+                        message=f"Rate limited — trying next model",
+                        cooldown_s=self._MODEL_RL_SECONDS,
+                    )
                     log.warning("Groq rate limit on %s — trying next model", model)
-                    continue  # still rate-limited, try next Groq model
+                    continue  # try next Groq model
                 else:
                     all_rate_limited = False
                     if msg.startswith("MODEL_ERROR:"):
+                        self._record_evt(stage="model_error", provider="groq", model=model, message=msg[:120])
                         continue  # model gone, try next
                     raise  # HTTP_ERROR or other — surface immediately
             except requests.RequestException as e:
@@ -1005,7 +1064,10 @@ class AIAnalyst:
         if groq_ok and _get_api_key():
             try:
                 result = self._call_groq_models(system_prompt, payload_text)
-                # Successful Groq call — clear any previous rate-limit flag.
+                # Successful Groq call — clear any previous global rate-limit flag.
+                if self._groq_rate_limited:
+                    self._record_evt(stage="provider_recovered", provider="groq",
+                                     message="Groq recovered — back on primary provider")
                 self._groq_rate_limited = False
                 return result
             except RuntimeError as e:
@@ -1016,6 +1078,12 @@ class AIAnalyst:
                     )
                     self._groq_rate_limited = True
                     self._groq_rl_until = now + config.GROQ_RATE_LIMIT_COOLDOWN
+                    self._record_evt(
+                        stage="provider_fallback", from_provider="groq",
+                        to_provider="openrouter",
+                        message=f"All Groq models rate-limited — switching to OpenRouter for {config.GROQ_RATE_LIMIT_COOLDOWN}s",
+                        cooldown_s=config.GROQ_RATE_LIMIT_COOLDOWN,
+                    )
                     # Fall through to OpenRouter below.
                 else:
                     raise
@@ -1028,6 +1096,9 @@ class AIAnalyst:
                 "Groq rate-limited and OPENROUTER_API_KEY is not set. "
                 "Add your OpenRouter key to use the free-model fallback."
             )
+
+        self._record_evt(stage="provider_fallback_active", provider="openrouter",
+                         cooldown_remaining=max(0, int(self._groq_rl_until - time.time())))
 
         # Use enhanced prompt for primary analyst; keep original for critic.
         or_prompt = (
@@ -1187,20 +1258,48 @@ class AIAnalyst:
         """Run the full pipeline for `symbol`. Blocking (call in a thread).
 
         No regime filter or trade-quality gate — every bar gets a full AI read.
-        Pipeline: memory context -> primary AI -> risk gate -> critic -> memory write.
+        Pipeline: market_data -> memory_context -> ai_call -> trade_quality -> critic -> signal_out.
+        Pipeline events are recorded at each stage and exposed via get_pipeline_log().
         """
+        run_id = f"{symbol}:{int(time.time())}"
+
+        # ── Stage 1: Market data ──────────────────────────────────────────
+        self._record_evt(run_id=run_id, stage="market_data", status="fetching", symbol=symbol)
+        t_data = time.time()
         analysis = engine.get_state(symbol, config.AI_INTERVAL)
         ov = analysis.get("overlays", {})
         a = atr(analysis["candles"]) or analysis["price"] * 0.005
+        self._record_evt(
+            run_id=run_id, stage="market_data", status="done", symbol=symbol,
+            price=analysis["price"], composite=round(analysis["composite"], 1),
+            regime_label=None,           # filled after classify() below
+            duration_ms=int((time.time() - t_data) * 1000),
+        )
 
         # Regime and structural quality computed for AI *context* only (not gates).
         regime = market_regime.classify(analysis)
         structural_quality = trade_quality.grade(analysis, plan=None, regime=None)
 
-        # 1. Signal memory — recent similar setups on this symbol, for context.
-        memory_rows = signal_memory.recent_similar(symbol, limit=config.SIGNAL_MEMORY_LOOKBACK)
+        # Update the market_data event with regime info now that we have it.
+        self._record_evt(
+            run_id=run_id, stage="market_data_regime", symbol=symbol,
+            regime=regime["regime"], direction=analysis["direction"],
+            composite=round(analysis["composite"], 1),
+        )
 
-        # 2. Primary AI analyst.
+        # ── Stage 2: Signal memory context ───────────────────────────────
+        self._record_evt(run_id=run_id, stage="memory_context", status="loading", symbol=symbol)
+        memory_rows = signal_memory.recent_similar(symbol, limit=config.SIGNAL_MEMORY_LOOKBACK)
+        self._record_evt(
+            run_id=run_id, stage="memory_context", status="done", symbol=symbol,
+            found=len(memory_rows),
+        )
+
+        # ── Stage 3: Primary AI call ──────────────────────────────────────
+        self._record_evt(
+            run_id=run_id, stage="ai_call", status="start", symbol=symbol,
+            interval=config.AI_INTERVAL, htf_interval=config.AI_HTF_INTERVAL,
+        )
         market = _compact_market(analysis, symbol, regime, structural_quality, memory_rows)
         user_text = (
             "Here is the live market data and context. Do your top-down discretionary read "
@@ -1210,6 +1309,13 @@ class AIAnalyst:
         t0 = time.time()
         model, raw = self._call_groq(user_text)
         latency_ms = int((time.time() - t0) * 1000)
+
+        # Infer provider from model name: OpenRouter models contain a "/"
+        provider = "openrouter" if model and "/" in model else "groq"
+        self._record_evt(
+            run_id=run_id, stage="ai_call", status="done", symbol=symbol,
+            model=model, provider=provider, latency_ms=latency_ms,
+        )
 
         # Update status metrics.
         with self._lock:
@@ -1234,8 +1340,6 @@ class AIAnalyst:
                 return None
 
         htf = market.get("higher_timeframe") or {}
-        # Infer provider from model name: OpenRouter models contain a "/"
-        provider = "openrouter" if model and "/" in model else "groq"
 
         result = {
             "symbol": symbol,
@@ -1268,20 +1372,61 @@ class AIAnalyst:
             "latency_ms": latency_ms,
         }
 
+        self._record_evt(
+            run_id=run_id, stage="ai_parsed", symbol=symbol,
+            signal=signal, confidence=result["confidence"],
+            setup_type=result["setup_type"], model=model, provider=provider,
+        )
+
         # Risk gate DISABLED — trusting AI's own risk/reward evaluation.
         # (Kept as method for reference; not called so no signals are lost.)
 
-        # 4. Compute final trade quality for display (no gate — informational only).
+        # ── Stage 4: Trade quality ────────────────────────────────────────
+        self._record_evt(run_id=run_id, stage="trade_quality", status="computing", symbol=symbol)
         plan = {"entry": result["entry"], "stop": result["stop"], "tp1": result["tp1"]}
         final_quality = trade_quality.grade(analysis, plan=plan, regime=None)
         result["trade_quality"] = final_quality
+        self._record_evt(
+            run_id=run_id, stage="trade_quality", status="done", symbol=symbol,
+            grade=final_quality["grade"] if final_quality else None,
+        )
 
-        # 5. AI critic — second opinion, can only downgrade to WAIT.
+        # ── Stage 5: AI critic ────────────────────────────────────────────
         if config.AI_CRITIC_ENABLED and result["signal"] in ("LONG", "SHORT"):
+            self._record_evt(
+                run_id=run_id, stage="critic", status="start", symbol=symbol,
+                reviewing_signal=result["signal"], confidence=result["confidence"],
+            )
             result, critic = self._call_critic(result, market)
             result["critic"] = critic
+            approved = (critic or {}).get("approve", True) if critic else True
+            self._record_evt(
+                run_id=run_id, stage="critic", status="done", symbol=symbol,
+                approved=approved,
+                concerns=len((critic or {}).get("concerns") or []) if critic else 0,
+                critique=((critic or {}).get("critique") or "")[:120] if critic else None,
+                final_signal=result["signal"],
+            )
+        else:
+            result["critic"] = None
+            if not config.AI_CRITIC_ENABLED:
+                self._record_evt(run_id=run_id, stage="critic", status="skipped",
+                                 symbol=symbol, reason="critic disabled in config")
+            else:
+                self._record_evt(run_id=run_id, stage="critic", status="skipped",
+                                 symbol=symbol, reason="AI returned WAIT — critic not invoked")
 
-        # 6. Signal memory — record what was actually published.
+        # ── Stage 6: Signal out ───────────────────────────────────────────
+        self._record_evt(
+            run_id=run_id, stage="signal_out", symbol=symbol,
+            signal=result["signal"], confidence=result["confidence"],
+            model=model, provider=provider, latency_ms=latency_ms,
+            setup_type=result["setup_type"],
+            gated=result.get("gated", False),
+            gate_reason=result.get("gate_reason"),
+        )
+
+        # ── Stage 7: Signal memory write ─────────────────────────────────
         if result["signal"] in ("LONG", "SHORT"):
             signal_memory.record({
                 "symbol": symbol,
