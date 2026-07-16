@@ -4,7 +4,11 @@
    - 15m + 1h AI predict-limit-signal mini-charts
    - Buy/sell pressure bar, tick-rate counter, candle countdown
    - Data-flash pulses on all live-updating elements
-   - Skeleton loading on symbol switch */
+   - Skeleton loading on symbol switch
+   - Live provider/model display (Groq / OpenRouter) + fallback badge
+   - Animated API pipeline (Market Data → AI Analyst → Risk Gate → Critic → Signal Out)
+   - Latency sparkline on AI Engine card
+   - Pipeline call log */
 (function () {
   "use strict";
 
@@ -13,6 +17,7 @@
     bg: "#131a22", grid: "#1f2a37", text: "#8b98a5",
     green: "#22c55e", red: "#ef4444", amber: "#f59e0b",
     ema7: "#eab308", ema25: "#38bdf8", ema99: "#a3a3a3",
+    blue: "#38bdf8", purple: "#a855f7", teal: "#0ea5e9",
   };
 
   /* ── element refs ─────────────────────────────────────────────────────────── */
@@ -603,7 +608,11 @@
     renderFundamentals(d);
   }
 
-  /* ── AI Engine Status widget ─────────────────────────────────────────────── */
+  /* ═══════════════════════════════════════════════════════════════════════════
+     AI ENGINE STATUS WIDGET
+     Shows: online dot, provider badge, model name, fallback badge,
+            latency value + sparkline, inference rate, total calls
+  ══════════════════════════════════════════════════════════════════════════════ */
   var waveBarsEl = document.getElementById("wave-bars");
   var WAVE_COUNT = 28;
   (function buildWave() {
@@ -614,7 +623,7 @@
     }
   })();
 
-  var wavePhase = 0;
+  var wavePhase  = 0;
   var engineOnline = false;
 
   function animateWave() {
@@ -631,34 +640,356 @@
   }
   animateWave();
 
+  /* Latency sparkline — ring buffer of last 20 readings */
+  var _latencyRing = [];
+  var _sparkCanvas = document.getElementById("latency-spark");
+  var _sparkCtx    = _sparkCanvas ? _sparkCanvas.getContext("2d") : null;
+
+  function pushLatencySample(ms) {
+    if (ms == null) return;
+    _latencyRing.push(ms);
+    if (_latencyRing.length > 20) _latencyRing.shift();
+    drawSparkline();
+  }
+
+  function drawSparkline() {
+    if (!_sparkCtx || _latencyRing.length < 2) return;
+    var W = _sparkCanvas.width, H = _sparkCanvas.height;
+    _sparkCtx.clearRect(0, 0, W, H);
+    var min = Math.min.apply(null, _latencyRing);
+    var max = Math.max.apply(null, _latencyRing);
+    var range = max - min || 1;
+    var step = W / (_latencyRing.length - 1);
+
+    _sparkCtx.beginPath();
+    _latencyRing.forEach(function (v, i) {
+      var x = i * step;
+      var y = H - ((v - min) / range) * (H - 2) - 1;
+      if (i === 0) _sparkCtx.moveTo(x, y); else _sparkCtx.lineTo(x, y);
+    });
+
+    var last = _latencyRing[_latencyRing.length - 1];
+    var gradient = _sparkCtx.createLinearGradient(0, 0, W, 0);
+    var latColor = last < 1000 ? "#22c55e" : last < 3000 ? "#f59e0b" : "#ef4444";
+    gradient.addColorStop(0, "rgba(56,189,248,0.3)");
+    gradient.addColorStop(1, latColor);
+
+    _sparkCtx.strokeStyle = gradient;
+    _sparkCtx.lineWidth = 1.5;
+    _sparkCtx.lineJoin = "round";
+    _sparkCtx.stroke();
+
+    // Dot at latest value
+    var lx = (_latencyRing.length - 1) * step;
+    var ly = H - ((last - min) / range) * (H - 2) - 1;
+    _sparkCtx.beginPath();
+    _sparkCtx.arc(lx, ly, 2, 0, Math.PI * 2);
+    _sparkCtx.fillStyle = latColor;
+    _sparkCtx.fill();
+  }
+
+  /* Previous provider/model — detect changes for animation */
+  var _prevProvider = null;
+
   function renderEngineStatus(s) {
     if (!s) return;
     engineOnline = s.online;
-    var dot      = document.getElementById("es-dot");
-    var label    = document.getElementById("es-status-label");
-    var version  = document.getElementById("es-version");
-    var models   = document.getElementById("es-models");
-    var latency  = document.getElementById("es-latency");
+
+    var dot       = document.getElementById("es-dot");
+    var label     = document.getElementById("es-status-label");
+    var version   = document.getElementById("es-version");
+    var latency   = document.getElementById("es-latency");
     var inference = document.getElementById("es-inference");
+    var totalEl   = document.getElementById("es-total");
+    var provBadge = document.getElementById("es-provider-badge");
+    var modelName = document.getElementById("es-model-name");
+    var fallback  = document.getElementById("es-fallback-badge");
 
-    dot.className   = s.online ? "es-dot online" : "es-dot";
-    label.textContent = s.online ? "Online" : "Offline";
-    version.textContent = s.version || "v4.2";
-    models.textContent  = s.active_models ? s.active_models + " active" : "—";
+    dot.className       = s.online ? "es-dot online" : "es-dot";
+    label.textContent   = s.online ? "Online" : "Offline";
+    version.textContent = s.version || "v4.3";
 
+    /* ── Provider + model name ── */
+    var prov = s.provider || null;  // "groq" | "openrouter" | null
+    if (prov !== _prevProvider) {
+      _prevProvider = prov;
+      // Animate the model row on provider switch
+      if (provBadge) {
+        provBadge.classList.remove("provider-switch-anim");
+        void provBadge.offsetWidth;
+        provBadge.classList.add("provider-switch-anim");
+      }
+    }
+
+    if (provBadge) {
+      if (prov === "groq") {
+        provBadge.className    = "es-provider-badge groq";
+        provBadge.textContent  = "GROQ";
+      } else if (prov === "openrouter") {
+        provBadge.className    = "es-provider-badge openrouter";
+        provBadge.textContent  = "OPENROUTER";
+      } else {
+        provBadge.className    = "es-provider-badge muted";
+        provBadge.textContent  = "—";
+      }
+    }
+
+    if (modelName) {
+      var mn = s.current_model || "";
+      // Strip ":free" suffix for display
+      var displayName = mn.replace(/:free$/, "").replace(/^meta-llama\//, "").replace(/^google\//, "");
+      modelName.textContent = displayName || "—";
+      modelName.title = mn; // full name on hover
+    }
+
+    /* ── Fallback badge ── */
+    if (fallback) {
+      if (s.groq_rate_limited) {
+        fallback.classList.remove("hidden");
+        var cd = s.groq_cooldown_remaining || 0;
+        fallback.textContent = "FALLBACK" + (cd > 0 ? " (" + cd + "s)" : "");
+      } else {
+        fallback.classList.add("hidden");
+      }
+    }
+
+    /* ── Latency ── */
     if (s.latency_ms != null) {
       latency.textContent = s.latency_ms + "ms";
       latency.className = "es-metric-value " +
         (s.latency_ms < 1000 ? "green" : s.latency_ms < 3000 ? "amber" : "red");
+      pushLatencySample(s.latency_ms);
     } else {
       latency.textContent = "—";
-      latency.className = "es-metric-value";
+      latency.className   = "es-metric-value";
     }
 
+    /* ── Inference rate ── */
     var rate = s.inference_per_min || 0;
-    inference.textContent = rate >= 1000 ? (rate / 1000).toFixed(1) + "k/min" : rate + "/min";
+    if (inference) inference.textContent = rate + "/min";
+
+    /* ── Total calls ── */
+    if (totalEl) {
+      var tot = s.total_inferences || 0;
+      totalEl.textContent = tot.toLocaleString();
+      // Trigger mid-pipeline animation when new inference detected
+      if (tot > _lastInferenceCount) {
+        _lastInferenceCount = tot;
+        triggerPipelineInFlight(s.current_model, s.provider);
+      }
+    }
+
     flash(document.getElementById("engine-status-card"), "card-flash-subtle");
   }
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+     API PIPELINE ANIMATION
+     5 stages: Market Data (0) → AI Analyst (1) → Risk Gate (2) → Critic (3) → Signal Out (4)
+     Animated with timed stage transitions and particle flow on connectors.
+  ══════════════════════════════════════════════════════════════════════════════ */
+
+  var _lastInferenceCount = 0;
+  var _pipelineActive     = false;
+  var _pipelineTimers     = [];
+  var _pipeCallStart      = 0;
+  var _pipeLastAI         = null;   // last AI result for log
+
+  /* Sub-label copy for each stage */
+  var STAGE_SUBS = ["live feed", "calling model…", "checking risk…", "reviewing…", "—"];
+
+  function _clearPipelineTimers() {
+    _pipelineTimers.forEach(clearTimeout);
+    _pipelineTimers = [];
+  }
+
+  /** Set a pipeline stage's visual state and update its sub-label */
+  function _setPipeStage(idx, state, subText) {
+    var stageEl = document.getElementById("pipe-stage-" + idx);
+    var subEl   = document.getElementById("pipe-sub-" + idx);
+    if (!stageEl) return;
+    stageEl.className = "pipe-stage " + state;
+    if (subEl && subText !== undefined) subEl.textContent = subText;
+  }
+
+  /** Animate the particle on connector idx with an optional color class */
+  function _flowConnector(idx, colorCls, dur) {
+    var conn     = document.getElementById("pipe-conn-" + idx);
+    var particle = document.getElementById("pipe-particle-" + idx);
+    if (!conn || !particle) return;
+    conn.className = "pipe-connector flowing";
+    particle.style.setProperty("--flow-dur", (dur || 0.65) + "s");
+    particle.className = "pipe-particle";
+    void particle.offsetWidth;
+    particle.className = "pipe-particle flowing" + (colorCls ? " " + colorCls : "");
+    // After particle arrives, leave line in flowing state
+    setTimeout(function () {
+      if (conn.classList.contains("flowing")) conn.className = "pipe-connector flowing";
+    }, (dur || 0.65) * 1000);
+  }
+
+  /** Mark a connector as done/long/short */
+  function _doneConnector(idx, state) {
+    var conn = document.getElementById("pipe-conn-" + idx);
+    if (conn) conn.className = "pipe-connector " + (state || "done");
+  }
+
+  /** Reset all pipeline stages + connectors to idle */
+  function _resetPipeline() {
+    for (var i = 0; i <= 4; i++) _setPipeStage(i, "idle", STAGE_SUBS[i] || "idle");
+    for (var j = 0; j <= 3; j++) {
+      var conn = document.getElementById("pipe-conn-" + j);
+      if (conn) conn.className = "pipe-connector";
+    }
+  }
+
+  /**
+   * Kick off mid-flight animation — called when engine_status shows a new inference.
+   * At this point we don't know the result yet; show stages 0→1 active.
+   */
+  function triggerPipelineInFlight(model, provider) {
+    if (_pipelineActive) return;   // already running, wait for result
+    _pipelineActive = true;
+    _pipeCallStart  = Date.now();
+    _clearPipelineTimers();
+
+    // Stage 0: Market Data — mark done immediately (data was already fetched)
+    _setPipeStage(0, "done", "fetched");
+    _flowConnector(0, "", 0.5);
+
+    _pipelineTimers.push(setTimeout(function () {
+      _doneConnector(0, "done");
+      // Stage 1: AI Analyst — active (thinking)
+      var shortModel = (model || "").replace(/:free$/, "").split("/").pop() || "model";
+      _setPipeStage(1, "active", shortModel);
+      _flowConnector(1, "", 0.8);
+    }, 550));
+  }
+
+  /**
+   * Complete the pipeline animation when the AI result arrives.
+   * signal: "LONG" | "SHORT" | "WAIT" | null
+   * model, provider: for display
+   * latencyMs: round-trip latency
+   */
+  function completePipeline(signal, model, provider, latencyMs) {
+    _pipelineActive = false;
+    _clearPipelineTimers();
+
+    var sigClass = signal === "LONG" ? "done-long" : signal === "SHORT" ? "done-short" : "wait";
+    var connClass = signal === "LONG" ? "long" : signal === "SHORT" ? "short" : "done";
+    var shortModel = (model || "").replace(/:free$/, "").split("/").pop() || "model";
+
+    // If pipeline wasn't started (no in-flight), do a fast run-through
+    if (!document.getElementById("pipe-stage-0").classList.contains("done")) {
+      _setPipeStage(0, "done", "fetched");
+    }
+
+    // Stage 1 complete
+    _setPipeStage(1, "done", shortModel);
+    _doneConnector(0, connClass);
+    _flowConnector(1, connClass, 0.45);
+
+    _pipelineTimers.push(setTimeout(function () {
+      _doneConnector(1, connClass);
+      // Stage 2: Risk Gate
+      _setPipeStage(2, "active", "evaluating…");
+      _flowConnector(2, connClass, 0.4);
+
+      _pipelineTimers.push(setTimeout(function () {
+        _doneConnector(2, connClass);
+        if (signal === "LONG" || signal === "SHORT") {
+          // Stage 3: Critic
+          _setPipeStage(2, "done", "passed");
+          _setPipeStage(3, "active", "reviewing…");
+          _flowConnector(3, connClass, 0.45);
+
+          _pipelineTimers.push(setTimeout(function () {
+            _doneConnector(3, connClass);
+            _setPipeStage(3, "done", "approved");
+            // Stage 4: Signal Out
+            _setPipeStage(4, sigClass,
+              signal === "LONG" ? "▲ LONG" : signal === "SHORT" ? "▼ SHORT" : "WAIT");
+          }, 500));
+        } else {
+          // WAIT — risk gate stops here
+          _setPipeStage(2, "wait", "wait");
+          _setPipeStage(3, "idle", "—");
+          _setPipeStage(4, "wait", "WAIT");
+          _doneConnector(3, "done");
+        }
+      }, 450));
+    }, 500));
+
+    // Update meta row
+    var lastCallEl = document.getElementById("pipe-last-call");
+    var durationEl = document.getElementById("pipe-duration");
+    var elapsed = latencyMs || (Date.now() - _pipeCallStart);
+    if (lastCallEl) lastCallEl.textContent = "Last call: just now";
+    if (durationEl) durationEl.textContent = elapsed + "ms";
+
+    // Log entry
+    addPipelineLogEntry(signal, model, provider, elapsed);
+
+    // Reset idle after 20 s
+    _pipelineTimers.push(setTimeout(function () {
+      _resetPipeline();
+      var lastCallEl2 = document.getElementById("pipe-last-call");
+      if (lastCallEl2 && elapsed) lastCallEl2.textContent = "Last call: " + Math.round(elapsed / 1000) + "s ago";
+    }, 20000));
+  }
+
+  /* Keep updating "X ago" on the last-call label */
+  var _lastCallTime = 0;
+  setInterval(function () {
+    if (!_lastCallTime) return;
+    var el = document.getElementById("pipe-last-call");
+    if (!el) return;
+    var diff = Math.round((Date.now() - _lastCallTime) / 1000);
+    if (diff < 5)  el.textContent = "Last call: just now";
+    else if (diff < 60)  el.textContent = "Last call: " + diff + "s ago";
+    else el.textContent = "Last call: " + Math.floor(diff / 60) + "m ago";
+  }, 5000);
+
+  /* Pipeline call log (max 30 entries) */
+  var _logEntries = 0;
+
+  function addPipelineLogEntry(signal, model, provider, latencyMs) {
+    _lastCallTime = Date.now();
+    var logEl = document.getElementById("pipe-log");
+    if (!logEl) return;
+
+    var empty = logEl.querySelector(".pipe-log-empty");
+    if (empty) empty.remove();
+
+    // Build entry
+    var row = document.createElement("div");
+    row.className = "pipe-log-row new-entry";
+
+    var now = new Date().toLocaleTimeString("en-US", { hour12: false });
+    var shortModel = (model || "unknown").replace(/:free$/, "");
+    var provCls    = provider === "groq" ? "groq" : provider === "openrouter" ? "openrouter" : "unknown";
+    var sigCls     = signal === "LONG" ? "long" : signal === "SHORT" ? "short" : "wait";
+    var sigLabel   = signal || "WAIT";
+
+    row.innerHTML =
+      '<span class="pipe-log-time">' + now + '</span>' +
+      '<span class="pipe-log-model ' + provCls + '">' +
+        (provider || "?").toUpperCase() +
+      '</span>' +
+      '<span class="pipe-log-signal ' + sigCls + '">' + sigLabel + '</span>' +
+      '<span class="pipe-log-sym">' + (symbolEl ? symbolEl.value : "") + '</span>' +
+      '<span class="pipe-log-lat">' + (latencyMs || "—") + 'ms</span>';
+
+    logEl.insertBefore(row, logEl.firstChild);
+    setTimeout(function () { row.classList.remove("new-entry"); }, 1000);
+
+    _logEntries++;
+    // Cap at 30 rows
+    while (logEl.children.length > 30) logEl.removeChild(logEl.lastChild);
+  }
+
+  // Init pipeline idle state
+  _resetPipeline();
 
   /* ── Binance status ──────────────────────────────────────────────────────── */
   function fetchBinanceStatus() {
@@ -869,6 +1200,22 @@
   function onAI(a) {
     lastAI = a;
     renderAI(a);
+
+    // Complete the pipeline animation with the result
+    if (a && !a.error) {
+      completePipeline(
+        a.signal || "WAIT",
+        a.model_used || a.model || null,
+        a.provider || null,
+        a.latency_ms || null
+      );
+    } else {
+      // Error path — reset pipeline
+      _pipelineActive = false;
+      _clearPipelineTimers();
+      _resetPipeline();
+    }
+
     if (!a || a.error || a.signal === "WAIT") return;
     var key = a.symbol + ":" + a.signal + ":" + a.entry;
     if (key === lastAIKey) return;

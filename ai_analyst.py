@@ -841,6 +841,15 @@ class AIAnalyst:
             rate_per_min = len(recent)
             signals = list(self._recent_ai_signals)
             cur_model = self._model or self._or_model
+            groq_rl = self._groq_rate_limited and now < self._groq_rl_until
+            cooldown_remaining = max(0, int(self._groq_rl_until - now)) if groq_rl else 0
+
+        # Infer provider from model name: OpenRouter models contain a "/"
+        if cur_model:
+            provider = "openrouter" if "/" in cur_model else "groq"
+        else:
+            provider = None
+
         return {
             "online": self.enabled,
             "version": "v4.3",
@@ -849,6 +858,9 @@ class AIAnalyst:
             "inference_per_min": rate_per_min,
             "total_inferences": self._inference_count,
             "current_model": cur_model,
+            "provider": provider,
+            "groq_rate_limited": groq_rl,
+            "groq_cooldown_remaining": cooldown_remaining,
             "last_error": self.last_error,
             "recent_signals": signals,
         }
