@@ -81,7 +81,7 @@ REGIME_COMPRESSION_TIGHT = 0.45
 REGIME_VOLATILITY_SPIKE = 1.8
 
 # ---- AI critic (second-pass review) ----
-AI_CRITIC_ENABLED = True
+AI_CRITIC_ENABLED = False
 
 # ---- Signal memory ----
 SIGNAL_MEMORY_LOOKBACK = 3  # past setups (same symbol) shown to the AI as context
