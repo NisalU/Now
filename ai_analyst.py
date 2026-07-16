@@ -1,18 +1,20 @@
-"""Groq AI analyst — discretionary structure/liquidity read on top of the
+"""AI analyst — discretionary structure/liquidity read on top of the
 confluence engine.
 
 Pipeline (no regime or trade-quality gates — every bar gets a full AI read):
 
     Market data (engine.py)
         -> Signal memory context (signal_memory.py)     -- past similar setups
-        -> Primary AI analyst (Groq, SYSTEM_PROMPT)      -- forms the thesis
+        -> Primary AI analyst (Groq -> OpenRouter fallback, SYSTEM_PROMPT)
         -> Server-side risk gate (_apply_risk_gate)      -- re-checks the math
-        -> AI critic (Groq, CRITIC_PROMPT)               -- second opinion
+        -> AI critic (second opinion)                    -- tries to kill it
         -> Signal memory write
 
-Market regime and structural trade quality are still computed and passed to
-the AI as *context*, but they do NOT filter or block any call. The AI itself
-uses that context to make better decisions.
+Provider priority:
+    1. Groq  (GROQ_API_KEY) — fast, high-quality; rate-limited on free tier
+    2. OpenRouter free models (OPENROUTER_API_KEY) — automatic fallback on
+       Groq 429.  Uses SYSTEM_PROMPT_ENHANCED, a more directive prompt tuned
+       for smaller/weaker models to still produce valid, conservative JSON.
 
 Pure Python — uses `requests` only, so it runs on Termux.
 """
@@ -35,16 +37,41 @@ from strategies.helpers import atr
 
 log = logging.getLogger("ai_analyst")
 
+# ---------------------------------------------------------------------------
+# Provider URLs
+# ---------------------------------------------------------------------------
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-# Tried in order; first model that responds is cached for the session.
+# ---------------------------------------------------------------------------
+# Model lists
+# ---------------------------------------------------------------------------
+
+# Groq models — tried in order; first that responds is cached for the session.
 GROQ_MODELS = [
     os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
     "llama-3.3-70b-versatile",
-    "openai/gpt-oss-120b",
+    "llama-3.1-70b-versatile",
     "llama-3.1-8b-instant",
 ]
 
+# OpenRouter free models — tried in order when Groq is rate-limited (429).
+# SYSTEM_PROMPT_ENHANCED is used instead of SYSTEM_PROMPT for these models.
+OPENROUTER_FREE_MODELS = [
+    m for m in [
+        os.environ.get("OPENROUTER_MODEL", ""),
+        "meta-llama/llama-3.3-70b-instruct:free",
+        "qwen/qwen3-235b-a22b:free",
+        "nousresearch/hermes-3-llama-3.1-405b:free",
+        "meta-llama/llama-3.1-70b-instruct:free",
+        "mistralai/mistral-7b-instruct:free",
+        "google/gemma-2-9b-it:free",
+    ] if m
+]
+
+# ---------------------------------------------------------------------------
+# Primary system prompt  (used with Groq high-quality models)
+# ---------------------------------------------------------------------------
 SYSTEM_PROMPT = """You are a high-level discretionary crypto market analyst.
 
 Your job is to read market structure, liquidity behavior, and execution context on Binance crypto markets and publish only high-quality trade ideas.
@@ -399,6 +426,142 @@ Only approve a trade when price, liquidity, structure, and execution quality cle
 Otherwise, return WAIT."""
 
 
+# ---------------------------------------------------------------------------
+# Enhanced system prompt  (used with OpenRouter free / smaller models)
+#
+# Design goals vs SYSTEM_PROMPT:
+#   - JSON schema shown first and repeated — weaker models lose the format
+#   - All instructions in short, direct sentences — reduces misinterpretation
+#   - WAIT bias made even more explicit — free models tend to over-trade
+#   - Anti-hallucination rule: only use levels from the provided data
+#   - No abstract framing — every rule is concrete and checkable
+#   - Anti-preamble instruction — prevents text before the JSON object
+# ---------------------------------------------------------------------------
+SYSTEM_PROMPT_ENHANCED = """CRITICAL OUTPUT RULE
+Your entire response must be a single valid JSON object.
+Start with { and end with }.
+No text, markdown, code fences, or explanation before or after the JSON.
+Violating this rule makes your response unusable.
+
+REQUIRED JSON SCHEMA
+{
+  "signal": "LONG" | "SHORT" | "WAIT",
+  "setup_type": "<setup label, e.g. 'liquidity sweep + reclaim', or 'none' if WAIT>",
+  "confidence": <integer 0-100>,
+  "entry": <number or null>,
+  "stop": <number or null>,
+  "tp1": <number or null>,
+  "tp2": <number or null>,
+  "risk_reward": <number or null>,
+  "orderflow_read": "<one sentence: describe delta/CVD/absorption evidence, or state it is absent>",
+  "reasoning": "<2-4 sentences: thesis, location, confirmation, target logic — use trader language, not indicator names>",
+  "invalidation": "<one sentence: exact price level or behavior that proves the idea wrong>"
+}
+
+When signal is WAIT: set entry, stop, tp1, tp2, risk_reward all to null.
+
+---
+
+ROLE
+You are a professional crypto market analyst.
+Your default answer is WAIT.
+WAIT is not a failure. WAIT is the correct answer most of the time.
+A missed trade is acceptable. A bad trade destroys capital.
+
+---
+
+WHEN YOU MAY CALL LONG OR SHORT
+All seven conditions must be true simultaneously.
+If any one is missing or doubtful, return WAIT.
+
+1. Higher timeframe (4h) structure clearly supports the direction.
+2. Price is at a precise, meaningful level from the data:
+   order block, fair value gap, support, resistance, or post-sweep reclaim.
+3. There is a concrete confirmation signal:
+   reclaim after sweep, rejection from zone, structure break with follow-through,
+   delta absorption, or CVD divergence.
+4. Stop loss sits at a logical invalidation level (not a random percentage).
+5. Risk/reward from entry to TP1 is at least 1.8.
+6. Entry is within 2.5 ATR of the current live price.
+7. You can state in one sentence who is trapped and where price is drawn next.
+
+---
+
+MANDATORY WAIT CONDITIONS
+Return WAIT immediately if any of the following apply:
+
+- Higher timeframe structure is unclear or mixed.
+- Price is between levels with no obvious magnet or trigger.
+- The directional move has already run 60%+ of the expected range.
+- Stop placement has no structural basis (would need to be a round % number).
+- Reward/risk to TP1 is below 1.8 after honest calculation.
+- Entry would be more than 2.5 ATR from current price.
+- Order-flow (delta, CVD) contradicts the structural direction.
+- Recent similar setups on this symbol have lost 2+ times in a row.
+- The risk_warnings field contains active cautions.
+
+---
+
+HOW TO READ THE INPUT DATA
+
+higher_timeframe → Start here. 4h bias sets the directional filter.
+liquidity → Look for sweeps and resting pools. These are the most important events.
+key_levels → support, resistance, order_blocks, fvg_mids, poc, vah, val.
+recent_candles → Read delta per bar. Is buying or selling dominant?
+cvd_last_24 → Is cumulative delta trending with or against price?
+strategies → Use as supporting evidence only. Never as a primary reason.
+market_regime → Informs context. High volatility or chop = lean toward WAIT.
+risk_warnings → Read all warnings. Heed them.
+
+Do NOT invent price levels that are not in the provided data.
+Do NOT use round numbers as support/resistance unless they appear in key_levels.
+Do NOT call a trade because the engine score is high or multiple indicators agree.
+
+---
+
+VALID TRADE CHECKLIST (run this before calling LONG or SHORT)
+
+[ ] HTF structure is clear and aligned
+[ ] Price is at a named level from key_levels or liquidity
+[ ] A confirmation event has occurred (not just "approaching the level")
+[ ] Stop is at the structural invalidation point
+[ ] R:R >= 1.8 to TP1 using actual numbers from entry, stop, tp1
+[ ] Entry is not chasing (within 2.5 ATR)
+[ ] Thesis can be stated in one sentence
+
+If any box is unchecked, signal must be WAIT.
+
+---
+
+ENTRY AND RISK RULES
+
+Entry: structural reclaim or retest entry preferred over breakout chase.
+Stop: must be at the level that, if hit, proves the thesis wrong.
+TP1: first realistic opposing level (opposing liquidity, supply/demand zone, POC).
+TP2: next major structural target beyond TP1.
+Risk/reward: compute honestly — (|tp1 - entry|) / (|entry - stop|). If < 1.8, return WAIT.
+
+---
+
+CONFIDENCE SCALE
+
+0-39:  unclear / poor / not tradable — return WAIT
+40-59: developing but missing a key piece — return WAIT unless very clean
+60-74: decent setup, tradable with caution
+75-89: strong setup, all conditions met
+90-100: extremely clean, rare — only if every condition is met beyond doubt
+
+Do not inflate confidence to justify a trade.
+A 55% confidence WAIT is more honest than an 80% confidence bad trade.
+
+---
+
+FINAL INSTRUCTION
+Output ONLY the JSON object.
+No introduction. No summary. No markdown.
+Begin your response with { and end with }."""
+
+
 CRITIC_PROMPT = """You are the risk-management critic on a discretionary trading desk.
 
 A primary analyst has proposed a trade call. Your only job is to try to kill it.
@@ -430,11 +593,15 @@ Respond ONLY with a JSON object using these exact keys:
 If the input signal is already WAIT, approve it — WAIT never needs defending."""
 
 
+# ---------------------------------------------------------------------------
+# Key helpers
+# ---------------------------------------------------------------------------
+
 def _get_api_key():
+    """Read GROQ_API_KEY from env or local .env file."""
     key = os.environ.get("GROQ_API_KEY", "").strip()
     if key:
         return key
-    # fall back to a local .env-style file (handy on Termux)
     base = os.path.dirname(__file__)
     for name in (".env", ".env.local", ".env.development.local"):
         try:
@@ -442,6 +609,24 @@ def _get_api_key():
                 for line in fh:
                     line = line.strip()
                     if line.startswith("GROQ_API_KEY="):
+                        return line.split("=", 1)[1].strip().strip('"').strip("'")
+        except OSError:
+            continue
+    return ""
+
+
+def _get_openrouter_key():
+    """Read OPENROUTER_API_KEY from env or local .env file."""
+    key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    if key:
+        return key
+    base = os.path.dirname(__file__)
+    for name in (".env", ".env.local", ".env.development.local"):
+        try:
+            with open(os.path.join(base, name)) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line.startswith("OPENROUTER_API_KEY="):
                         return line.split("=", 1)[1].strip().strip('"').strip("'")
         except OSError:
             continue
@@ -599,16 +784,23 @@ def _fmt_setup_type(raw):
     return label[:30]
 
 
+# ---------------------------------------------------------------------------
+# Main analyst class
+# ---------------------------------------------------------------------------
+
 class AIAnalyst:
     def __init__(self):
         self._lock = threading.Lock()
         self._cache = {}          # symbol -> ai result dict
-        self._model = None        # first working model, cached
-        self.enabled = bool(_get_api_key())
+        self._model = None        # first working Groq model, cached for session
+        self._or_model = None     # first working OpenRouter model, cached for session
+        self._groq_rate_limited = False   # flip to True on 429; reset after 5 min
+        self._groq_rl_until = 0.0         # epoch time when Groq cooldown expires
+        self.enabled = bool(_get_api_key() or _get_openrouter_key())
         self.last_error = None
 
         # Engine status metrics
-        self._last_latency = None       # ms of last Groq round-trip
+        self._last_latency = None       # ms of last AI round-trip
         self._inference_count = 0       # total AI calls made
         self._inference_window = deque(maxlen=120)  # timestamps for rate calculation
         self._active_models = set()     # models that have responded this session
@@ -648,14 +840,15 @@ class AIAnalyst:
             recent = [t for t in self._inference_window if now - t < 60]
             rate_per_min = len(recent)
             signals = list(self._recent_ai_signals)
+            cur_model = self._model or self._or_model
         return {
             "online": self.enabled,
-            "version": "v4.2",
+            "version": "v4.3",
             "active_models": len(config.WEIGHTS),  # strategy model count (10)
             "latency_ms": self._last_latency,
             "inference_per_min": rate_per_min,
             "total_inferences": self._inference_count,
-            "current_model": self._model,
+            "current_model": cur_model,
             "last_error": self.last_error,
             "recent_signals": signals,
         }
@@ -664,58 +857,181 @@ class AIAnalyst:
         with self._lock:
             return list(self._recent_ai_signals)
 
-    # ---------------- Groq call ----------------
-    def _call_groq(self, payload_text):
-        return self._call_groq_with_prompt(SYSTEM_PROMPT, payload_text)
+    # -----------------------------------------------------------------------
+    # Low-level HTTP calls
+    # -----------------------------------------------------------------------
 
-    def _call_groq_with_prompt(self, system_prompt, payload_text):
-        """Generic Groq call parameterized on the system prompt so the same
-        model-fallback/retry logic serves both the primary analyst and the
-        critic without duplicating it."""
+    def _post_model(self, url, headers, model, system_prompt, payload_text, timeout=45):
+        """Single HTTP POST to an OpenAI-compatible chat endpoint.
+        Returns (model, content_str) on success.
+        Raises RuntimeError with a tag prefix for caller to inspect:
+          - 'RATE_LIMIT:...'  → 429 received
+          - 'MODEL_ERROR:...' → 400/404 model issue, try next model
+          - 'HTTP_ERROR:...'  → other non-200 status
+        """
+        resp = requests.post(
+            url,
+            headers=headers,
+            json={
+                "model": model,
+                "temperature": 0.2,
+                "max_tokens": 700,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": payload_text},
+                ],
+            },
+            timeout=timeout,
+        )
+        if resp.status_code == 200:
+            body = resp.json()
+            content = body["choices"][0]["message"]["content"]
+            return model, content
+        if resp.status_code == 429:
+            raise RuntimeError(f"RATE_LIMIT:{model}: {resp.text[:120]}")
+        if resp.status_code in (400, 404) and "model" in resp.text.lower():
+            raise RuntimeError(f"MODEL_ERROR:{model}: {resp.status_code} {resp.text[:80]}")
+        raise RuntimeError(f"HTTP_ERROR:{model}: {resp.status_code} {resp.text[:160]}")
+
+    def _call_groq_models(self, system_prompt, payload_text):
+        """Try each Groq model in order.
+        Returns (model, content) on success.
+        Raises RuntimeError('RATE_LIMIT:...') if ALL tried models returned 429.
+        Raises RuntimeError with details if all failed for other reasons.
+        """
         key = _get_api_key()
         if not key:
             raise RuntimeError("GROQ_API_KEY not set")
+        headers = {
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+        }
         models = [self._model] if self._model else []
         models += [m for m in GROQ_MODELS if m and m not in models]
+
+        last_exc = None
+        all_rate_limited = True
+        for model in models:
+            try:
+                result = self._post_model(GROQ_URL, headers, model, system_prompt, payload_text)
+                self._model = model
+                self._active_models.add(model)
+                return result
+            except RuntimeError as e:
+                msg = str(e)
+                last_exc = e
+                if msg.startswith("RATE_LIMIT:"):
+                    log.warning("Groq rate limit on %s — trying next model", model)
+                    continue  # still rate-limited, try next Groq model
+                else:
+                    all_rate_limited = False
+                    if msg.startswith("MODEL_ERROR:"):
+                        continue  # model gone, try next
+                    raise  # HTTP_ERROR or other — surface immediately
+            except requests.RequestException as e:
+                last_exc = e
+                all_rate_limited = False
+                continue
+
+        if all_rate_limited:
+            raise RuntimeError(f"RATE_LIMIT:all Groq models rate-limited: {last_exc}")
+        raise RuntimeError(f"all Groq models failed: {last_exc}")
+
+    def _call_openrouter_models(self, system_prompt, payload_text):
+        """Try each OpenRouter free model in order.
+        Returns (model, content) on success.
+        Raises RuntimeError if all fail.
+        """
+        key = _get_openrouter_key()
+        if not key:
+            raise RuntimeError("OPENROUTER_API_KEY not set")
+        headers = {
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/NisalU/Now",
+            "X-Title": "AI Trading Signal Bot",
+        }
+        models = [self._or_model] if self._or_model else []
+        models += [m for m in OPENROUTER_FREE_MODELS if m and m not in models]
+
         last_exc = None
         for model in models:
             try:
-                resp = requests.post(
-                    GROQ_URL,
-                    headers={
-                        "Authorization": f"Bearer {key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": model,
-                        "temperature": 0.2,
-                        "max_tokens": 700,
-                        "response_format": {"type": "json_object"},
-                        "messages": [
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": payload_text},
-                        ],
-                    },
-                    timeout=45,
+                result = self._post_model(
+                    OPENROUTER_URL, headers, model, system_prompt, payload_text, timeout=60
                 )
-                if resp.status_code == 200:
-                    self._model = model
-                    self._active_models.add(model)
-                    body = resp.json()
-                    return model, body["choices"][0]["message"]["content"]
-                # model gone / not allowed -> try next model
-                if resp.status_code in (400, 404) and "model" in resp.text.lower():
-                    last_exc = RuntimeError(f"{model}: {resp.status_code} {resp.text[:120]}")
+                self._or_model = model
+                self._active_models.add(model)
+                log.info("OpenRouter fallback succeeded with model: %s", model)
+                return result
+            except RuntimeError as e:
+                msg = str(e)
+                last_exc = e
+                if msg.startswith("RATE_LIMIT:") or msg.startswith("MODEL_ERROR:"):
+                    log.warning("OpenRouter model %s failed (%s), trying next", model, msg[:60])
                     continue
-                if resp.status_code == 429:
-                    raise RuntimeError(f"Groq rate limited: {resp.text[:120]}")
-                raise RuntimeError(f"Groq HTTP {resp.status_code}: {resp.text[:160]}")
+                raise
             except requests.RequestException as e:
                 last_exc = e
                 continue
-        raise RuntimeError(f"all Groq models failed: {last_exc}")
 
-    # ---------------- risk gate ----------------
+        raise RuntimeError(f"all OpenRouter models failed: {last_exc}")
+
+    def _call_groq_with_prompt(self, system_prompt, payload_text):
+        """Route AI call: Groq first, OpenRouter free models as fallback on rate-limit.
+
+        When Groq is rate-limited the enhanced prompt (SYSTEM_PROMPT_ENHANCED)
+        is used for OpenRouter instead of the caller's system_prompt, unless
+        the caller itself is already using SYSTEM_PROMPT_ENHANCED (e.g. the
+        critic passing its own prompt — in that case we use the passed prompt).
+        Returns (model_name, content_str).
+        """
+        now = time.time()
+        groq_ok = not self._groq_rate_limited or now >= self._groq_rl_until
+
+        if groq_ok and _get_api_key():
+            try:
+                result = self._call_groq_models(system_prompt, payload_text)
+                # Successful Groq call — clear any previous rate-limit flag.
+                self._groq_rate_limited = False
+                return result
+            except RuntimeError as e:
+                if str(e).startswith("RATE_LIMIT:"):
+                    log.warning(
+                        "Groq rate-limited across all models — falling back to OpenRouter "
+                        "for the next %d seconds", config.GROQ_RATE_LIMIT_COOLDOWN
+                    )
+                    self._groq_rate_limited = True
+                    self._groq_rl_until = now + config.GROQ_RATE_LIMIT_COOLDOWN
+                    # Fall through to OpenRouter below.
+                else:
+                    raise
+
+        # OpenRouter fallback — use enhanced prompt for the primary analyst,
+        # keep the caller's prompt for the critic (it's already very concise).
+        or_key = _get_openrouter_key()
+        if not or_key:
+            raise RuntimeError(
+                "Groq rate-limited and OPENROUTER_API_KEY is not set. "
+                "Add your OpenRouter key to use the free-model fallback."
+            )
+
+        # Use enhanced prompt for primary analyst; keep original for critic.
+        or_prompt = (
+            SYSTEM_PROMPT_ENHANCED
+            if system_prompt == SYSTEM_PROMPT
+            else system_prompt
+        )
+        return self._call_openrouter_models(or_prompt, payload_text)
+
+    def _call_groq(self, payload_text):
+        return self._call_groq_with_prompt(SYSTEM_PROMPT, payload_text)
+
+    # -----------------------------------------------------------------------
+    # Risk gate
+    # -----------------------------------------------------------------------
+
     def _apply_risk_gate(self, result, atr_value, ov):
         """Re-derive risk/reward from actual entry/stop/tp1 numbers and
         downgrade to WAIT only for hard arithmetic failures. This is NOT a
@@ -765,9 +1081,12 @@ class AIAnalyst:
             })
         return result
 
-    # ---------------- AI critic ----------------
+    # -----------------------------------------------------------------------
+    # AI critic
+    # -----------------------------------------------------------------------
+
     def _call_critic(self, result, market):
-        """Second, independent Groq call that challenges the primary call.
+        """Second, independent AI call that challenges the primary call.
         Never raises; on any failure the primary result is kept as-is."""
         if result["signal"] not in ("LONG", "SHORT"):
             return result, None
@@ -816,7 +1135,10 @@ class AIAnalyst:
             })
         return result, {"approve": approve, "concerns": concerns, "critique": critique}
 
-    # ---------------- public API ----------------
+    # -----------------------------------------------------------------------
+    # Public API
+    # -----------------------------------------------------------------------
+
     def _wait_result(self, symbol, analysis, reason, regime=None, extra=None):
         result = {
             "symbol": symbol,
@@ -886,7 +1208,7 @@ class AIAnalyst:
         try:
             out = json.loads(raw)
         except ValueError:
-            raise RuntimeError(f"Groq returned non-JSON: {raw[:160]}")
+            raise RuntimeError(f"AI returned non-JSON: {raw[:160]}")
 
         signal = str(out.get("signal", "WAIT")).upper()
         if signal not in ("LONG", "SHORT", "WAIT"):
