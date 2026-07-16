@@ -591,6 +591,20 @@ If the input signal is already WAIT, approve it — WAIT never needs defending."
 # Key helpers
 # ---------------------------------------------------------------------------
 
+def _parse_env_value(line: str, key: str) -> str:
+    """Extract value for `key` from a .env line, handling both
+    ``KEY=value`` and ``export KEY=value`` formats."""
+    line = line.strip()
+    if line.startswith("#") or "=" not in line:
+        return ""
+    # strip optional leading 'export '
+    if line.startswith("export "):
+        line = line[len("export "):].lstrip()
+    if not line.startswith(key + "="):
+        return ""
+    return line.split("=", 1)[1].strip().strip('"').strip("'")
+
+
 def _get_openrouter_key():
     """Read OPENROUTER_API_KEY from env or local .env file."""
     key = os.environ.get("OPENROUTER_API_KEY", "").strip()
@@ -601,9 +615,9 @@ def _get_openrouter_key():
         try:
             with open(os.path.join(base, name)) as fh:
                 for line in fh:
-                    line = line.strip()
-                    if line.startswith("OPENROUTER_API_KEY="):
-                        return line.split("=", 1)[1].strip().strip('"').strip("'")
+                    val = _parse_env_value(line, "OPENROUTER_API_KEY")
+                    if val:
+                        return val
         except OSError:
             continue
     return ""
