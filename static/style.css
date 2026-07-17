@@ -737,6 +737,79 @@ select:hover { border-color: #38bdf8; }
 .toast-dir  { font-size: .88rem; }
 .toast-meta { font-size: .72rem; color: #94a3b8; font-weight: 400; }
 
+/* ── Hot Coin Scanner ───────────────────────────────────────────────────── */
+.scanner-card { padding: 16px 18px 14px; }
+.scanner-title-row { display: flex; align-items: center; gap: 8px; }
+.scanner-pulse {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: #f59e0b;
+  box-shadow: 0 0 0 0 rgba(245,158,11,.6);
+  animation: scanner-ping 2s ease infinite;
+}
+@keyframes scanner-ping {
+  0%   { box-shadow: 0 0 0 0 rgba(245,158,11,.6); }
+  70%  { box-shadow: 0 0 0 8px rgba(245,158,11,0); }
+  100% { box-shadow: 0 0 0 0 rgba(245,158,11,0); }
+}
+.scanner-meta { display: flex; align-items: center; gap: 10px; }
+.scanner-count-badge {
+  font-size: .68rem; font-weight: 700; letter-spacing: .06em;
+  background: rgba(245,158,11,.15); color: #f59e0b;
+  border: 1px solid rgba(245,158,11,.3);
+  padding: 2px 8px; border-radius: 10px;
+}
+.scanner-time { font-size: .65rem; color: #374151; }
+.scanner-hint { font-size: .67rem; color: #374151; margin: 4px 0 10px; }
+.scanner-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.scanner-grid {
+  display: flex; gap: 8px; padding-bottom: 4px;
+  min-width: max-content;
+}
+.scanner-empty { font-size: .78rem; color: #374151; padding: 6px 0; }
+.scanner-coin {
+  display: flex; flex-direction: column; gap: 4px;
+  background: #1a2230; border: 1px solid #1f2a37; border-radius: 8px;
+  padding: 10px 12px; cursor: pointer; min-width: 110px;
+  transition: border-color .2s, background .2s;
+  position: relative;
+}
+.scanner-coin:hover { background: #1e2a3a; border-color: #38bdf8; }
+.scanner-coin.top3  { border-color: rgba(245,158,11,.4); background: rgba(245,158,11,.04); }
+.scanner-coin.top10 { border-color: rgba(239,68,68,.3); }
+.sc-rank {
+  position: absolute; top: 6px; right: 8px;
+  font-size: .58rem; color: #374151; font-weight: 700;
+}
+.sc-name {
+  font-size: .85rem; font-weight: 700; color: #e2e8f0;
+  letter-spacing: .02em;
+}
+.sc-usdt { font-size: .6rem; color: #374151; font-weight: 400; }
+.sc-chg {
+  font-size: .82rem; font-weight: 700;
+}
+.sc-chg.up   { color: #22c55e; }
+.sc-chg.down { color: #ef4444; }
+.sc-row { display: flex; gap: 6px; align-items: center; }
+.sc-vol, .sc-amp {
+  font-size: .62rem; color: #4b5563;
+}
+.sc-vol::before { content: "vol "; }
+.sc-amp::before { content: "± "; }
+
+/* ── Scalp timeframe badge ───────────────────────────────────────────────── */
+.badge-tf {
+  display: inline-block; font-size: .6rem; font-weight: 700; letter-spacing: .05em;
+  padding: 1px 5px; border-radius: 3px; vertical-align: middle;
+  border: 1px solid currentColor;
+}
+.badge-tf-1m  { color: #ef4444; background: rgba(239,68,68,.12); border-color: rgba(239,68,68,.3); }
+.badge-tf-3m  { color: #f59e0b; background: rgba(245,158,11,.12); border-color: rgba(245,158,11,.3); }
+.badge-tf-5m  { color: #38bdf8; background: rgba(56,189,248,.12); border-color: rgba(56,189,248,.3); }
+.badge-tf-15m { color: #a855f7; background: rgba(168,85,247,.12); border-color: rgba(168,85,247,.3); }
+/* TF column in AI signals table */
+.tf-cell { white-space: nowrap; }
+
 /* ── MARKET / LIMIT order badges ────────────────────────────────────────── */
 .badge-market {
   display: inline-block; font-size: .6rem; font-weight: 700; letter-spacing: .07em;

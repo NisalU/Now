@@ -69,6 +69,26 @@
       <span class="signal-lock-detail" id="signal-lock-detail"></span>
     </div>
 
+    <!-- Hot Coin Scanner -->
+    <section class="card scanner-card" id="scanner-card">
+      <div class="card-head">
+        <div class="scanner-title-row">
+          <span class="scanner-pulse" id="scanner-pulse"></span>
+          <h2>🔥 Volatile Coin Scanner</h2>
+        </div>
+        <div class="scanner-meta">
+          <span class="scanner-count-badge" id="scanner-count">scanning…</span>
+          <span class="scanner-time" id="scanner-time"></span>
+        </div>
+      </div>
+      <div class="scanner-hint">Click any coin to switch chart · Ranked by volatility score · Updates every 5 min</div>
+      <div class="scanner-scroll">
+        <div class="scanner-grid" id="scanner-list">
+          <div class="scanner-empty">Scanning Binance for high-volatility USDT pairs…</div>
+        </div>
+      </div>
+    </section>
+
     <!-- Status row: AI Engine + Binance -->
     <div class="status-row">
       <section class="card engine-status-card" id="engine-status-card">
@@ -354,14 +374,15 @@
             <tr>
               <th>Time</th>
               <th>Symbol</th>
+              <th>TF</th>
               <th>Setup</th>
               <th>Direction</th>
-              <th>Confidence</th>
+              <th>Conf</th>
             </tr>
           </thead>
           <tbody id="ai-sig-tbody">
             <tr class="ai-sig-empty">
-              <td colspan="5">No AI signals yet &mdash; watching for high-quality setups&hellip;</td>
+              <td colspan="6">No AI signals yet &mdash; watching for high-quality scalp setups&hellip;</td>
             </tr>
           </tbody>
         </table>

@@ -23,6 +23,7 @@ config     = None  # type: ignore[assignment]
 ai_analyst = None  # type: ignore[assignment]
 engine     = None  # type: ignore[assignment]
 manager    = None  # type: ignore[assignment]
+scanner    = None  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------
@@ -68,12 +69,13 @@ def _prompt_for_keys() -> None:
 
 
 def _load_app_modules() -> None:
-    global config, ai_analyst, engine, manager
+    global config, ai_analyst, engine, manager, scanner
 
     import config as _config
     from ai_analyst import ai_analyst as _ai_analyst
     from engine import engine as _engine
     from stream import manager as _manager
+    from scanner import scanner as _scanner
 
     _config.BINANCE_API_KEY    = os.environ.get("BINANCE_API_KEY", "")
     _config.BINANCE_API_SECRET = os.environ.get("BINANCE_API_SECRET", "")
@@ -82,6 +84,7 @@ def _load_app_modules() -> None:
     ai_analyst = _ai_analyst
     engine     = _engine
     manager    = _manager
+    scanner    = _scanner
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +162,13 @@ async def api_pipeline_events(_request: web.Request) -> web.Response:
     })
 
 
+async def api_scanner(_request: web.Request) -> web.Response:
+    """Return current hot-coin scanner results."""
+    coins     = scanner.get_hot_coins() if scanner else []
+    last_scan = scanner.get_last_scan() if scanner else 0
+    return web.json_response({"coins": coins, "last_scan": last_scan, "count": len(coins)})
+
+
 async def api_pending_limits(request: web.Request) -> web.Response:
     """Return pending LIMIT order signals (waiting for price to reach entry)."""
     symbol = request.query.get("symbol")
@@ -227,6 +237,11 @@ async def ws_endpoint(request: web.Request) -> web.WebSocketResponse:
             client.send({"type": "pending_limits",   "data": ai_analyst.get_pending_limits(client.symbol)})
             # Send countdown for default symbol
             _push_countdown(client, client.symbol)
+        # Send current scanner state
+        if scanner:
+            _coins = scanner.get_hot_coins()
+            if _coins:
+                client.send({"type": "scanner_update", "data": _coins})
         manager.add_client(client)
 
         async def push_snapshot(symbol, interval):
@@ -428,13 +443,21 @@ async def on_startup(app: web.Application) -> None:
     if ai_analyst.enabled:
         app["ai_task"]     = asyncio.create_task(_ai_loop())
         app["status_task"] = asyncio.create_task(_status_loop())
-        print("[ai] Groq AI analyst enabled — 1-min refresh cycle active")
+        print(f"[ai] Groq AI analyst enabled — {config.AI_REFRESH_SECONDS}s scalp refresh active")
     else:
         print("[ai] No Groq key — AI analysis disabled")
     if config.BINANCE_API_KEY:
         print("[binance] API key configured")
     else:
         print("[binance] No API key — public endpoints only")
+    # Start coin scanner
+    if getattr(config, "SCANNER_ENABLED", True) and scanner:
+        def _ws_broadcast(msg):
+            for c in manager.clients:
+                c.send(msg)
+        scanner.set_broadcaster(_ws_broadcast)
+        scanner.start()
+        print(f"[scanner] Hot-coin scanner started — every {config.SCANNER_INTERVAL}s")
 
 
 async def on_cleanup(app: web.Application) -> None:
@@ -444,6 +467,8 @@ async def on_cleanup(app: web.Application) -> None:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+    if scanner:
+        scanner.stop()
     await manager.stop()
 
 
@@ -460,6 +485,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/pipeline-events",    api_pipeline_events)
     app.router.add_get("/api/signal-status",      api_signal_status)
     app.router.add_get("/api/pending-limits",     api_pending_limits)
+    app.router.add_get("/api/scanner",            api_scanner)
     app.router.add_get("/ws",                     ws_endpoint)
     app.router.add_static("/static", BASE_DIR / "static", name="static")
     app.on_startup.append(on_startup)

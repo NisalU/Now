@@ -1205,7 +1205,7 @@
       var msg = sigFilterMode === "symbol"
         ? "No AI signals for " + (symbolEl.value || "this symbol") + " yet"
         : "No AI signals yet — watching for high-quality setups…";
-      empty.innerHTML = "<td colspan='5'>" + msg + "</td>";
+      empty.innerHTML = "<td colspan='6'>" + msg + "</td>";
       tbody.appendChild(empty);
       sigCountEl.textContent = "";
       return;
@@ -1234,6 +1234,11 @@
       badge.textContent = row.symbol || "—";
       symTd.appendChild(badge);
 
+      var tfTd  = document.createElement("td");
+      tfTd.className = "tf-cell";
+      var tfVal = row.scalp_timeframe || "—";
+      tfTd.innerHTML = '<span class="badge-tf badge-tf-' + tfVal + '">' + tfVal + "</span>";
+
       var setupTd = document.createElement("td");
       setupTd.className = "setup-cell";
       setupTd.textContent = row.setup_type || "—";
@@ -1253,6 +1258,7 @@
 
       tr.appendChild(timeEl);
       tr.appendChild(symTd);
+      tr.appendChild(tfTd);
       tr.appendChild(setupTd);
       tr.appendChild(dirTd);
       tr.appendChild(confTd);
@@ -1285,10 +1291,12 @@
     var orderBadge = s.order_type === "LIMIT"
       ? ' <span class="badge-limit">LIMIT</span>'
       : ' <span class="badge-market">MARKET</span>';
+    var _tf = s.scalp_timeframe || s.interval || "";
+    var tfBadge = _tf ? ' <span class="badge-tf badge-tf-' + _tf + '">' + _tf + "</span>" : "";
     el.innerHTML =
       '<div class="sig-top">' +
-        '<span class="sig-dir">' + s.direction + (s.strength ? " · " + s.strength : "") + orderBadge + "</span>" +
-        '<span class="sig-meta">' + s.symbol + " " + (s.interval || "") + " · " + s.score + "% confidence</span>" +
+        '<span class="sig-dir">' + s.direction + (s.strength ? " · " + s.strength : "") + orderBadge + tfBadge + "</span>" +
+        '<span class="sig-meta">' + s.symbol + " · " + s.score + "% conf</span>" +
       "</div>" +
       '<div class="sig-meta">' + when + " · @ " + fmt(s.price, digitsFor(s.price)) + "</div>" +
       (s.reasons && s.reasons.length
@@ -1395,6 +1403,65 @@
     }, 8000);
   }
 
+  /* ── Coin Scanner ─────────────────────────────────────────────────────── */
+  function renderScanner(coins) {
+    var container = document.getElementById("scanner-list");
+    var countEl   = document.getElementById("scanner-count");
+    var timeEl    = document.getElementById("scanner-time");
+    if (!container) return;
+    if (countEl) countEl.textContent = (coins.length || 0) + " coins";
+    if (timeEl)  timeEl.textContent  = new Date().toLocaleTimeString("en-US", { hour12: false });
+
+    container.innerHTML = "";
+    if (!coins || !coins.length) {
+      container.innerHTML = '<div class="scanner-empty">No hot coins found — scan in progress…</div>';
+      return;
+    }
+
+    coins.forEach(function (c, idx) {
+      var rank    = idx + 1;
+      var icon    = rank <= 3 ? "🔥" : rank <= 10 ? "⚡" : "◆";
+      var cls     = rank <= 3 ? "scanner-coin top3" : rank <= 10 ? "scanner-coin top10" : "scanner-coin";
+      var dirCls  = c.change_pct >= 0 ? "up" : "down";
+      var chgSign = c.change_pct >= 0 ? "+" : "";
+      var d       = digitsFor(c.price || 1);
+
+      var chip = document.createElement("div");
+      chip.className = cls;
+      chip.innerHTML =
+        '<span class="sc-rank">' + icon + " #" + rank + "</span>" +
+        '<span class="sc-name">' + c.base + '<span class="sc-usdt">USDT</span></span>' +
+        '<span class="sc-chg ' + dirCls + '">' + chgSign + c.change_pct + "%</span>" +
+        '<span class="sc-row">' +
+          '<span class="sc-vol">' + c.volume_usdt + "M</span>" +
+          '<span class="sc-amp">' + c.amp_pct + "%</span>" +
+        "</span>";
+
+      chip.title = c.symbol + "  |  Vol: $" + c.volume_usdt + "M  |  H/L ±" + c.amp_pct + "%  |  Score: " + c.score;
+
+      // Click → switch to this coin
+      chip.addEventListener("click", function () {
+        if (!symbolEl) return;
+        // Add option if not already in dropdown
+        var found = false;
+        for (var i = 0; i < symbolEl.options.length; i++) {
+          if (symbolEl.options[i].value === c.symbol) { found = true; break; }
+        }
+        if (!found) {
+          var opt = document.createElement("option");
+          opt.value = c.symbol; opt.textContent = c.symbol;
+          symbolEl.appendChild(opt);
+        }
+        if (symbolEl.value !== c.symbol) {
+          symbolEl.value = c.symbol;
+          localStorage.setItem(LS_SYM, c.symbol);
+          reset();
+        }
+      });
+      container.appendChild(chip);
+    });
+  }
+
   function onAI(a) {
     lastAI = a;
     renderAI(a);
@@ -1418,34 +1485,49 @@
     if (key === lastAIKey) return;
     lastAIKey = key;
     pushSignal({
-      direction:  a.signal,
-      strength:   "AI · " + a.confidence + "%",
-      order_type: a.order_type || "MARKET",
-      symbol:     a.symbol,
-      interval:   a.interval,
-      score:      a.confidence,
-      time:       a.updated,
-      price:      a.entry != null ? a.entry : a.price,
-      reasons:    [a.setup_type, a.orderflow_read].filter(Boolean),
+      direction:       a.signal,
+      strength:        "AI · " + a.confidence + "%",
+      order_type:      a.order_type || "MARKET",
+      scalp_timeframe: a.scalp_timeframe || a.interval || "5m",
+      symbol:          a.symbol,
+      interval:        a.interval,
+      score:           a.confidence,
+      time:            a.updated,
+      price:           a.entry != null ? a.entry : a.price,
+      reasons:         [a.setup_type, a.orderflow_read].filter(Boolean),
     });
   }
 
   /* ── selectors with localStorage restore ────────────────────────────────── */
   function fillSelect(el, values, serverDefault) {
-    if (el.childElementCount) return;
     var lsKey = el === symbolEl ? LS_SYM : LS_INT;
     var saved = localStorage.getItem(lsKey);
     var pick  = (saved && values.indexOf(saved) >= 0) ? saved : serverDefault;
-    values.forEach(function (v) {
-      var o = document.createElement("option");
-      o.value = v; o.textContent = v;
-      if (v === pick) o.selected = true;
-      el.appendChild(o);
-    });
-    if (pick !== serverDefault) {
-      setTimeout(function () {
-        if (symbolEl.childElementCount && intervalEl.childElementCount) subscribe();
-      }, 80);
+
+    if (!el.childElementCount) {
+      // First load: fully populate and restore saved selection
+      values.forEach(function (v) {
+        var o = document.createElement("option");
+        o.value = v; o.textContent = v;
+        if (v === pick) o.selected = true;
+        el.appendChild(o);
+      });
+      if (pick !== serverDefault) {
+        setTimeout(function () {
+          if (symbolEl.childElementCount && intervalEl.childElementCount) subscribe();
+        }, 80);
+      }
+    } else {
+      // Already populated — merge any new coins added by the scanner
+      var existing = {};
+      for (var i = 0; i < el.options.length; i++) existing[el.options[i].value] = true;
+      values.forEach(function (v) {
+        if (!existing[v]) {
+          var o = document.createElement("option");
+          o.value = v; o.textContent = v;
+          el.appendChild(o);
+        }
+      });
     }
   }
 
@@ -1516,6 +1598,9 @@
           break;
         case "limit_triggered":
           onLimitTriggered(m.data);
+          break;
+        case "scanner_update":
+          renderScanner(m.data);
           break;
         case "pipeline_log":
           renderPipelineEvents(m.data);
