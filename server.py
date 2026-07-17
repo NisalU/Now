@@ -269,15 +269,21 @@ async def ws_endpoint(request: web.Request) -> web.WebSocketResponse:
                 sym = msg.get("symbol", config.DEFAULT_SYMBOL)
                 ivl = msg.get("interval", config.DEFAULT_INTERVAL)
                 if sym in config.SYMBOLS and ivl in config.INTERVALS:
-                    old_sym = client.symbol
-                    client.symbol   = sym
-                    client.interval = ivl
+                    # retarget() updates client.symbol/interval AND calls
+                    # _resub.set() so the Binance WebSocket immediately
+                    # subscribes to the new symbol's aggTrade + kline streams.
+                    # Without this, price ticks never arrive for the new coin.
+                    manager.retarget(client, sym, ivl)
                     asyncio.create_task(push_snapshot(sym, ivl))
                     # Push cached AI immediately so dashboard updates without wait
                     if ai_analyst.enabled:
                         cached_ai = ai_analyst.get_cached(sym)
                         if cached_ai:
                             client.send({"type": "ai", "data": cached_ai})
+                        else:
+                            # No cached result — kick off an immediate analysis
+                            # so the user gets a signal in seconds, not 45s.
+                            asyncio.create_task(_quick_ai(sym))
                         _push_countdown(client, sym)
                         client.send({"type": "engine_status",    "data": ai_analyst.get_status()})
                         client.send({"type": "ai_signals_table", "data": ai_analyst.get_recent_signals()})
@@ -309,6 +315,34 @@ def _push_countdown(client, symbol):
             "next_ts":     next_ts,
             "interval_s":  config.AI_REFRESH_SECONDS,
         })
+
+
+async def _quick_ai(symbol: str) -> None:
+    """Run an immediate AI analysis for `symbol` and broadcast the result.
+
+    Called when a client subscribes to a symbol that has no cached AI result
+    so the dashboard shows a signal within seconds rather than waiting up to
+    AI_REFRESH_SECONDS for the regular loop to get around to it.
+    """
+    try:
+        result = await asyncio.to_thread(ai_analyst.analyze_safe, symbol)
+        if not result:
+            return
+        ai_payload       = {"type": "ai",               "data": result}
+        pipeline_payload = {"type": "pipeline_log",     "data": ai_analyst.get_pipeline_log()[:40]}
+        status_payload   = {"type": "engine_status",    "data": ai_analyst.get_status()}
+        signals_payload  = {"type": "ai_signals_table", "data": ai_analyst.get_recent_signals()}
+        limits_payload   = {"type": "pending_limits",   "data": ai_analyst.get_pending_limits(symbol)}
+        for c in manager.clients:
+            if c.symbol == symbol:
+                c.send(ai_payload)
+                c.send(pipeline_payload)
+                c.send(limits_payload)
+            c.send(status_payload)
+            c.send(signals_payload)
+        asyncio.create_task(_push_ai_charts(symbol, result))
+    except Exception:
+        traceback.print_exc()
 
 
 # ---------------------------------------------------------------------------
