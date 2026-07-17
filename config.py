@@ -8,13 +8,15 @@ PORT = 8000
 # ---- Market data ----
 # Pinned symbols: always watched regardless of scanner results.
 # Scanner adds high-vol coins on top dynamically.
-DEFAULT_SYMBOL = "SOLUSDT"
+DEFAULT_SYMBOL = "APTUSDT"
+# Pinned symbols — keep only genuinely volatile altcoins.
+# Slow large-caps (ETH, BNB, SOL, LTC, ADA, DOT, etc.) are excluded;
+# they dilute the scanner and the AI analysis queue.
 PINNED_SYMBOLS = [
-    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
-    "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT",
-    "NEARUSDT", "APTUSDT", "ARBUSDT", "INJUSDT", "SUIUSDT",
-    "TIAUSDT", "SEIUSDT", "WIFUSDT", "BONKUSDT", "PEPEUSDT",
-    "FETUSDT",
+    "BTCUSDT",   # market reference only
+    "APTUSDT", "INJUSDT", "SUIUSDT", "TIAUSDT",
+    "SEIUSDT", "WIFUSDT", "BONKUSDT", "PEPEUSDT",
+    "FETUSDT", "NOTUSDT", "TURBOUSDT", "MEWUSDT",
 ]
 SYMBOLS = list(PINNED_SYMBOLS)   # Scanner updates this at runtime
 
@@ -58,16 +60,15 @@ STRONG_THRESHOLD = 40
 MAX_SIGNAL_HISTORY = 500
 ENGINE_SIGNAL_FEED = False
 
-# ---- AI analyst — scalp focus ----
-AI_INTERVAL      = "5m"    # primary analysis timeframe (scalp)
-AI_HTF_INTERVAL  = "15m"   # higher-timeframe confirmation
-AI_REFRESH_SECONDS = 30    # re-analyze every 30 s for fast scalp signals
+# ---- AI analyst — one-shot directional swing signals ----
+AI_INTERVAL      = "15m"   # primary analysis timeframe (15-min candles)
+AI_HTF_INTERVAL  = "1h"    # higher-timeframe confirmation
+AI_REFRESH_SECONDS = 45    # re-analyze every 45 s (15m candles change slowly)
 
-AI_SCALP_INTERVALS  = ["1m", "3m", "5m"]   # timeframes AI can signal on
 AI_MIN_CALL_INTERVAL = 2.1
 
-# Server-side risk gate — relaxed for high-vol altcoins
-AI_MIN_RISK_REWARD        = 1.0   # 1:1 acceptable for scalps
+# Server-side risk gate
+AI_MIN_RISK_REWARD        = 1.5   # 1.5:1 minimum for swing entries
 AI_MAX_ENTRY_ATR_DISTANCE = 3.0
 
 # Model rotation cooldown
@@ -102,9 +103,15 @@ AI_PROMPT_MEMORY_ROWS = 3
 # ---- Limit signals ----
 LIMIT_SIGNALS_ENABLED = True
 
-# ---- Coin scanner ----
+# ---- Coin scanner — focused on fast movers, not slow large-caps ----
 SCANNER_ENABLED           = True
-SCANNER_INTERVAL          = 300        # scan every 5 minutes
-SCANNER_MIN_VOLUME_USDT   = 20_000_000 # $20 M minimum 24h USDT volume
-SCANNER_VOLATILITY_MIN_PCT = 2.0       # minimum 2% 24h absolute move
-SCANNER_TOP_N             = 20         # top 20 coins by volatility score
+SCANNER_INTERVAL          = 240        # scan every 4 minutes
+SCANNER_MIN_VOLUME_USDT   = 3_000_000  # $3 M minimum — catch micro-cap rockets
+SCANNER_VOLATILITY_MIN_PCT = 4.0       # 4%+ 24h move — only real movers
+SCANNER_TOP_N             = 25         # top 25 coins by volatility score
+# Large-caps excluded from scanner (too slow for high-vol altcoin mode)
+SCANNER_EXCLUDE_SLOW_CAPS = {
+    "BTC", "ETH", "BNB", "SOL", "LTC", "ADA", "DOT", "AVAX",
+    "LINK", "UNI", "AAVE", "CRV", "MATIC", "OP", "ARB",
+    "XRP", "ATOM", "ALGO", "FTM", "SAND", "MANA", "ICP",
+}

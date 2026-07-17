@@ -35,15 +35,15 @@ _EXCLUDE_FRAGMENTS = ("UP", "DOWN", "BULL", "BEAR", "3L", "3S", "2L", "2S")
 
 
 def _vol_score(t: dict) -> float:
-    """Composite volatility score used for ranking."""
+    """Composite volatility score — strongly biased toward raw price movement."""
     pct    = abs(float(t.get("priceChangePercent", 0)))
-    vol    = float(t.get("quoteVolume", 0))          # USDT volume
+    vol    = float(t.get("quoteVolume", 0))
     high   = float(t.get("highPrice", 0))
     low    = max(float(t.get("lowPrice", 1e-12)), 1e-12)
-    amp    = (high / low - 1.0) * 100.0              # high/low amplitude %
+    amp    = (high / low - 1.0) * 100.0
     trades = float(t.get("count", 0))
-    # Weight: raw % move is strongest signal, then amplitude, then liquidity proxy
-    return pct * 3.5 + amp * 1.0 + min(vol / 1e8, 10.0) * 0.8 + min(trades / 1e5, 5.0) * 0.3
+    # Raw move % is the dominant signal; amplitude secondary; volume is tie-breaker only
+    return pct * 6.0 + amp * 2.5 + min(vol / 1e9, 3.0) * 0.5 + min(trades / 2e5, 2.0) * 0.2
 
 
 class CoinScanner:
@@ -93,13 +93,17 @@ class CoinScanner:
         min_pct = getattr(config, "SCANNER_VOLATILITY_MIN_PCT", 2.0)
         top_n   = getattr(config, "SCANNER_TOP_N", 20)
 
+        # Merge slow-cap exclusions from config
+        slow_caps = getattr(config, "SCANNER_EXCLUDE_SLOW_CAPS", set())
+        exclude_bases = _EXCLUDE_BASES | set(slow_caps)
+
         candidates = []
         for t in raw:
             sym  = t.get("symbol", "")
             if not sym.endswith("USDT"):
                 continue
             base = sym[:-4]
-            if base in _EXCLUDE_BASES:
+            if base in exclude_bases:
                 continue
             if any(frag in base for frag in _EXCLUDE_FRAGMENTS):
                 continue

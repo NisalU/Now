@@ -390,13 +390,14 @@
     _tickCount++;
     if (t.sell) _sellVol += t.qty; else _buyVol += t.qty;
     updatePressure();
-    if (isLoading) return;
+    // Always update price display and tape — do NOT gate on isLoading
     priceDigits = digitsFor(t.price);
     targetPrice = t.price;
     flashPrice(t.price);
     var sizeTag = t.qty > 10 ? " ●" : t.qty > 1 ? " ·" : "";
     tapeEl.textContent = (t.sell ? "▼ " : "▲ ") + fmt(t.qty, 3) + sizeTag + "  @ " + fmt(t.price, priceDigits);
     tapeEl.className   = "tape " + (t.sell ? "down" : "up") + (t.qty > 5 ? " big" : "");
+    if (isLoading) return;  // Don't touch chart series during skeleton load
     if (lastCandle && t.time / 1000 >= lastCandle.time) {
       lastCandle.close = t.price;
       if (t.price > lastCandle.high) lastCandle.high = t.price;
@@ -493,7 +494,7 @@
   var shownScore = 0;
   function renderVerdict(d) {
     priceDigits = digitsFor(d.price);
-    if (targetPrice === null) targetPrice = d.price;
+    targetPrice = d.price;  // always sync — fallback when WS ticks are unavailable
     var chg = document.getElementById("chg");
     if (d.ticker) {
       var pct = d.ticker.change_pct;
