@@ -760,6 +760,42 @@ select:hover { border-color: #38bdf8; }
 }
 .scanner-time { font-size: .65rem; color: #374151; }
 .scanner-hint { font-size: .67rem; color: #374151; margin: 4px 0 10px; }
+
+/* ── Scan Now button ─────────────────────────────────────────────────────── */
+.scan-btn {
+  background: #1a2535;
+  color: #64b5f6;
+  border: 1px solid #2d4a6e;
+  border-radius: 4px;
+  padding: 3px 10px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: .68rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .15s, border-color .15s, color .15s, opacity .15s;
+  white-space: nowrap;
+  letter-spacing: .03em;
+}
+.scan-btn:hover:not(:disabled) {
+  background: #1f3a5c;
+  border-color: #4a90d9;
+  color: #90caf9;
+}
+.scan-btn:disabled,
+.scan-btn.scanning {
+  opacity: .55;
+  cursor: not-allowed;
+  color: #8b98a5;
+  border-color: #1f2a37;
+}
+.scan-btn.scanning {
+  animation: scan-pulse 1.2s ease-in-out infinite;
+}
+@keyframes scan-pulse {
+  0%, 100% { opacity: .55; }
+  50%       { opacity: .85; }
+}
+
 .scanner-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .scanner-grid {
   display: flex; gap: 8px; padding-bottom: 4px;

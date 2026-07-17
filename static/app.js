@@ -1404,6 +1404,57 @@
     }, 8000);
   }
 
+  /* ── Scanner scanning state ──────────────────────────────────────────── */
+  var _scanBtn = null;
+
+  function initScanBtn() {
+    _scanBtn = document.getElementById("scan-btn");
+    if (!_scanBtn) return;
+    _scanBtn.addEventListener("click", function () {
+      if (_scanBtn.disabled) return;
+      // Send scan_now over WebSocket (fast path)
+      if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: "scan_now" }));
+      }
+      setScanBtnScanning(true);
+    });
+  }
+
+  function setScanBtnScanning(scanning) {
+    if (!_scanBtn) _scanBtn = document.getElementById("scan-btn");
+    if (!_scanBtn) return;
+    if (scanning) {
+      _scanBtn.disabled = true;
+      _scanBtn.textContent = "⟳ Scanning…";
+      _scanBtn.classList.add("scanning");
+      var hintEl = document.getElementById("scanner-status-hint");
+      if (hintEl) hintEl.textContent = "Scanning Binance…";
+      var countEl = document.getElementById("scanner-count");
+      if (countEl) countEl.textContent = "scanning…";
+    } else {
+      _scanBtn.disabled = false;
+      _scanBtn.textContent = "⟳ Scan Now";
+      _scanBtn.classList.remove("scanning");
+    }
+  }
+
+  function onScannerScanning(msg) {
+    if (msg.scanning) {
+      setScanBtnScanning(true);
+    } else {
+      setScanBtnScanning(false);
+      var hintEl = document.getElementById("scanner-status-hint");
+      if (hintEl) {
+        if (msg.error) {
+          hintEl.textContent = "Scan failed — try again";
+        } else {
+          var t = new Date().toLocaleTimeString("en-US", { hour12: false });
+          hintEl.textContent = "Last scan: " + t + " · " + (msg.count || 0) + " coins";
+        }
+      }
+    }
+  }
+
   /* ── Coin Scanner ─────────────────────────────────────────────────────── */
   function renderScanner(coins) {
     var container = document.getElementById("scanner-list");
@@ -1411,7 +1462,12 @@
     var timeEl    = document.getElementById("scanner-time");
     if (!container) return;
     if (countEl) countEl.textContent = (coins.length || 0) + " coins";
-    if (timeEl)  timeEl.textContent  = new Date().toLocaleTimeString("en-US", { hour12: false });
+    var ts = new Date().toLocaleTimeString("en-US", { hour12: false });
+    if (timeEl)  timeEl.textContent  = ts;
+    // Ensure button is re-enabled after results arrive
+    setScanBtnScanning(false);
+    var hintEl = document.getElementById("scanner-status-hint");
+    if (hintEl) hintEl.textContent = "Last scan: " + ts + " · " + (coins.length || 0) + " coins";
 
     container.innerHTML = "";
     if (!coins || !coins.length) {
@@ -1600,6 +1656,9 @@
         case "limit_triggered":
           onLimitTriggered(m.data);
           break;
+        case "scanner_scanning":
+          onScannerScanning(m);
+          break;
         case "scanner_update":
           renderScanner(m.data);
           break;
@@ -1678,5 +1737,6 @@
   symbolEl.addEventListener("change",  function () { localStorage.setItem(LS_SYM, symbolEl.value);   reset(); });
   intervalEl.addEventListener("change", function () { localStorage.setItem(LS_INT, intervalEl.value); reset(); });
 
+  initScanBtn();
   connect();
 })();

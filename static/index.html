@@ -77,14 +77,15 @@
           <h2>🔥 Volatile Coin Scanner</h2>
         </div>
         <div class="scanner-meta">
-          <span class="scanner-count-badge" id="scanner-count">scanning…</span>
+          <span class="scanner-count-badge" id="scanner-count">—</span>
           <span class="scanner-time" id="scanner-time"></span>
+          <button class="scan-btn" id="scan-btn" title="Fetch fresh volatile coins from Binance">⟳ Scan Now</button>
         </div>
       </div>
-      <div class="scanner-hint">Click any coin to switch chart · Ranked by volatility score · Updates every 5 min</div>
+      <div class="scanner-hint">Click any coin to switch chart · Ranked by volatility score · <span id="scanner-status-hint">Press Scan Now to refresh</span></div>
       <div class="scanner-scroll">
         <div class="scanner-grid" id="scanner-list">
-          <div class="scanner-empty">Scanning Binance for high-volatility USDT pairs…</div>
+          <div class="scanner-empty">Press <strong>Scan Now</strong> to fetch the latest hot coins from Binance.</div>
         </div>
       </div>
     </section>

@@ -169,6 +169,16 @@ async def api_scanner(_request: web.Request) -> web.Response:
     return web.json_response({"coins": coins, "last_scan": last_scan, "count": len(coins)})
 
 
+
+async def api_scanner_scan(request: web.Request) -> web.Response:
+    """Trigger a manual coin scan and broadcast results via WebSocket."""
+    if not scanner:
+        return web.json_response({"ok": False, "error": "Scanner not available"}, status=503)
+    if scanner.is_scanning():
+        return web.json_response({"ok": False, "already_scanning": True})
+    triggered = scanner.trigger_scan()
+    return web.json_response({"ok": triggered, "already_scanning": not triggered})
+
 async def api_pending_limits(request: web.Request) -> web.Response:
     """Return pending LIMIT order signals (waiting for price to reach entry)."""
     symbol = request.query.get("symbol")
@@ -293,6 +303,11 @@ async def ws_endpoint(request: web.Request) -> web.WebSocketResponse:
             elif kind == "ping":
                 # Application-level ping → pong with echo timestamp
                 client.send({"type": "pong", "t": msg.get("t", 0)})
+
+            elif kind == "scan_now":
+                # Manual coin scan triggered by user button
+                if scanner:
+                    scanner.trigger_scan()
 
     finally:
         send_task.cancel()
@@ -487,11 +502,15 @@ async def on_startup(app: web.Application) -> None:
     # Start coin scanner
     if getattr(config, "SCANNER_ENABLED", True) and scanner:
         def _ws_broadcast(msg):
-            for c in manager.clients:
+            for c in list(manager.clients):
                 c.send(msg)
         scanner.set_broadcaster(_ws_broadcast)
-        scanner.start()
-        print(f"[scanner] Hot-coin scanner started — every {config.SCANNER_INTERVAL}s")
+        # Run initial scan in background; manual scans are user-triggered after that
+        import threading as _threading
+        _threading.Thread(
+            target=scanner.initial_scan, daemon=True, name="scanner-init"
+        ).start()
+        print("[scanner] Coin scanner ready — manual scan mode")
 
 
 async def on_cleanup(app: web.Application) -> None:
@@ -501,8 +520,7 @@ async def on_cleanup(app: web.Application) -> None:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
-    if scanner:
-        scanner.stop()
+    # scanner has no persistent loop in manual-scan mode
     await manager.stop()
 
 
@@ -520,6 +538,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/signal-status",      api_signal_status)
     app.router.add_get("/api/pending-limits",     api_pending_limits)
     app.router.add_get("/api/scanner",            api_scanner)
+    app.router.add_post("/api/scanner/scan",       api_scanner_scan)
     app.router.add_get("/ws",                     ws_endpoint)
     app.router.add_static("/static", BASE_DIR / "static", name="static")
     app.on_startup.append(on_startup)
