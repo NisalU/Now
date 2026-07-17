@@ -39,10 +39,10 @@ GROQ_BASE_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODELS = [
     m for m in [
         os.environ.get("GROQ_MODEL", ""),
-        "openai/gpt-oss-120b",
-        "llama-3.3-70b-versatile",
-        "openai/gpt-oss-20b",
-        "llama-3.1-8b-instant",
+        "llama-3.3-70b-versatile",   # 12k TPM — primary (most headroom)
+        "openai/gpt-oss-120b",       # 8k TPM — fallback
+        "openai/gpt-oss-20b",        # fallback
+        "llama-3.1-8b-instant",      # last resort
     ] if m
 ]
 
@@ -149,7 +149,7 @@ Return ONLY valid JSON — no markdown, no extra text:
   "entry":       <number>,
   "stop_loss":   <number>,
   "take_profit": [<tp1_number>, <tp2_number>],
-  "reason":      "≤ 40 words: best setup found + direction + key level + why now."
+  "reason":      "≤ 20 words: setup + direction + key level + why now."
 }"""
 
 
@@ -239,56 +239,50 @@ def _compact_market(analysis, symbol, regime, structural_quality, memory_rows):
     cvd = ov.get("cvd") or []
     cvd_tail = [_fnum(p["value"], 2) for p in cvd[-PROMPT_CVD_POINTS:]]
 
+    # Lean strategy list — name + net contribution only (no verbose reasons)
     strategies = [
-        {
-            "name": b["label"], "weight": b["weight"], "score": b["score"],
-            "contribution": b["contribution"], "reasons": b["reasons"][:2],
-        }
-        for b in analysis["breakdown"]
+        {"name": b["label"], "contribution": b["contribution"]}
+        for b in sorted(analysis["breakdown"], key=lambda b: -abs(b["contribution"]))[:6]
     ]
 
     levels = {}
     if ov.get("support"):
-        levels["support"] = [_fnum(lv["price"]) for lv in ov["support"][:4]]
+        levels["support"] = [_fnum(lv["price"]) for lv in ov["support"][:2]]
     if ov.get("resistance"):
-        levels["resistance"] = [_fnum(lv["price"]) for lv in ov["resistance"][:4]]
+        levels["resistance"] = [_fnum(lv["price"]) for lv in ov["resistance"][:2]]
     if ov.get("volume_profile"):
         vp = ov["volume_profile"]
         levels["poc"] = _fnum(vp["poc"])
-        levels["vah"] = _fnum(vp["vah"])
-        levels["val"] = _fnum(vp["val"])
     if ov.get("order_blocks"):
         levels["order_blocks"] = [
             {"type": ob["type"], "top": _fnum(ob["top"]), "bottom": _fnum(ob["bottom"])}
-            for ob in ov["order_blocks"][:3]
+            for ob in ov["order_blocks"][:2]
         ]
     if ov.get("fvgs"):
         levels["fvg_mids"] = [
-            {"type": f["type"], "mid": _fnum(f["mid"])} for f in ov["fvgs"][:3]
+            {"type": f["type"], "mid": _fnum(f["mid"])} for f in ov["fvgs"][:2]
         ]
 
-    fundamentals = ov.get("fundamentals")
+    # Risk warnings only — skip raw fundamentals object (verbose)
+    risk_notes = _risk_warnings(analysis, regime, memory_rows)
 
     return {
-        "symbol": analysis["symbol"],
-        "chart": config.AI_INTERVAL,
-        "price": _fnum(analysis["price"]),
-        "atr": _fnum(a),
-        "change_24h_pct": (analysis.get("ticker") or {}).get("change_pct"),
+        "symbol":                analysis["symbol"],
+        "chart":                 config.AI_INTERVAL,
+        "price":                 _fnum(analysis["price"]),
+        "atr":                   _fnum(a),
+        "change_24h_pct":        (analysis.get("ticker") or {}).get("change_pct"),
         "engine_composite_score": analysis["composite"],
-        "engine_direction": analysis["direction"],
-        "market_regime": regime,
-        "structural_quality": structural_quality,
-        "higher_timeframe": _htf_summary(symbol),
-        "liquidity": _liquidity_context(ov),
-        "strategies": strategies,
-        "orderflow_divergence": ov.get("divergence"),
-        "cvd_last_24": cvd_tail,
-        "key_levels": levels,
-        "futures_fundamentals": fundamentals,
-        "recent_similar_setups": memory_rows[:PROMPT_MEMORY_ROWS],
-        "risk_warnings": _risk_warnings(analysis, regime, memory_rows),
-        "recent_candles": recent,
+        "engine_direction":      analysis["direction"],
+        "market_regime":         regime.get("regime"),
+        "structural_quality":    structural_quality,
+        "higher_timeframe":      _htf_summary(symbol),
+        "liquidity":             _liquidity_context(ov),
+        "strategies":            strategies,
+        "cvd_tail":              cvd_tail,
+        "key_levels":            levels,
+        "risk_warnings":         risk_notes,
+        "recent_candles":        recent,
     }
 
 

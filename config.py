@@ -90,15 +90,16 @@ ACTIVE_SIGNAL_LOCK = True
 REGIME_COMPRESSION_TIGHT  = 0.35  # alts compress harder before explosive moves
 REGIME_VOLATILITY_SPIKE   = 2.5   # alts regularly spike 3–10% in one candle
 
-# Token budgets
-AI_MAX_TOKENS        = 2000
-AI_MAX_TOKENS_RETRY  = 3000
+# Token budgets — response JSON is tiny (~150 tokens); keep limits tight
+# to stay within Groq TPM quotas (llama-3.3-70b: 12k TPM).
+AI_MAX_TOKENS        = 350
+AI_MAX_TOKENS_RETRY  = 500
 AI_JSON_FAIL_COOLDOWN = 30
 
-# Prompt sizing — more context for short timeframes
-AI_PROMPT_CANDLES    = 10
-AI_PROMPT_CVD_POINTS = 20
-AI_PROMPT_MEMORY_ROWS = 3
+# Prompt sizing — lean context keeps total request < 3000 tokens
+AI_PROMPT_CANDLES    = 5
+AI_PROMPT_CVD_POINTS = 6
+AI_PROMPT_MEMORY_ROWS = 2
 
 # ---- Limit signals ----
 LIMIT_SIGNALS_ENABLED = True
