@@ -327,6 +327,43 @@
   }
   requestAnimationFrame(rafLoop);
 
+
+  /* ── Price sparkline ────────────────────────────────────────────────────── */
+  var _sparkBuf = [];
+  var _sparkMax = 80;
+  var _sparkCanvas = document.getElementById("price-spark");
+  var _sparkCtx    = _sparkCanvas ? _sparkCanvas.getContext("2d") : null;
+
+  function pushSpark(price) {
+    _sparkBuf.push(price);
+    if (_sparkBuf.length > _sparkMax) _sparkBuf.shift();
+  }
+
+  function drawSpark() {
+    if (!_sparkCtx || _sparkBuf.length < 2) return;
+    var W = _sparkCanvas.width, H = _sparkCanvas.height;
+    _sparkCtx.clearRect(0, 0, W, H);
+    var min = Math.min.apply(null, _sparkBuf);
+    var max = Math.max.apply(null, _sparkBuf);
+    var range = max - min || 1;
+    var isUp  = _sparkBuf[_sparkBuf.length - 1] >= _sparkBuf[0];
+    var col   = isUp ? "#22c55e" : "#ef4444";
+    _sparkCtx.strokeStyle = col;
+    _sparkCtx.lineWidth   = 1.5;
+    _sparkCtx.shadowColor = col;
+    _sparkCtx.shadowBlur  = 3;
+    _sparkCtx.beginPath();
+    _sparkBuf.forEach(function (p, i) {
+      var x = (i / (_sparkBuf.length - 1)) * W;
+      var y = H - ((p - min) / range) * (H - 4) - 2;
+      i === 0 ? _sparkCtx.moveTo(x, y) : _sparkCtx.lineTo(x, y);
+    });
+    _sparkCtx.stroke();
+    _sparkCtx.shadowBlur = 0;
+  }
+  setInterval(drawSpark, 400);
+
+  var _lastFootprint = null;  // footprint POC/VAH/VAL from last snapshot overlay
   var lastFlashPrice = null;
   function flashPrice(p) {
     if (lastFlashPrice !== null && p !== lastFlashPrice) {
@@ -386,6 +423,9 @@
   }
 
   /* ── tick / kline ────────────────────────────────────────────────────────── */
+  /* avg qty tracker for whale detection */
+  var _avgQty = 0.5;
+
   function onTick(t) {
     _tickCount++;
     if (t.sell) _sellVol += t.qty; else _buyVol += t.qty;
@@ -394,9 +434,12 @@
     priceDigits = digitsFor(t.price);
     targetPrice = t.price;
     flashPrice(t.price);
+    pushSpark(t.price);
     var sizeTag = t.qty > 10 ? " ●" : t.qty > 1 ? " ·" : "";
     tapeEl.textContent = (t.sell ? "▼ " : "▲ ") + fmt(t.qty, 3) + sizeTag + "  @ " + fmt(t.price, priceDigits);
-    tapeEl.className   = "tape " + (t.sell ? "down" : "up") + (t.qty > 5 ? " big" : "");
+    _avgQty = _avgQty * 0.97 + t.qty * 0.03;
+    var isWhale = t.qty > _avgQty * 18 && t.qty > 2;
+    tapeEl.className   = "tape " + (t.sell ? "down" : "up") + (t.qty > 5 ? " big" : "") + (isWhale ? " whale" : "");
     if (isLoading) return;  // Don't touch chart series during skeleton load
     if (lastCandle && t.time / 1000 >= lastCandle.time) {
       lastCandle.close = t.price;
@@ -483,6 +526,8 @@
     });
     markers.sort(function (a, b) { return a.time - b.time; });
     candleSeries.setMarkers(markers);
+    // Cache footprint overlay for signal-out display
+    if (ov.footprint) _lastFootprint = ov.footprint;
     renderAI(lastAI);
     if (firstLoad) {
       chart.timeScale().fitContent();
@@ -867,23 +912,54 @@
     }, msPerChar);
   }
 
+  /* Signal-age timer ─────────────────────────────────── */
+  var _signalFireTime = 0;
+  setInterval(function () {
+    var ageEl = document.getElementById("pd-signal-age");
+    if (!ageEl || !_signalFireTime) return;
+    var sec = Math.round((Date.now() - _signalFireTime) / 1000);
+    if (sec < 5)  ageEl.textContent = "";
+    else if (sec < 60) ageEl.textContent = sec + "s ago";
+    else ageEl.textContent = Math.floor(sec / 60) + "m " + (sec % 60) + "s ago";
+  }, 1000);
+
   function _updateSignalOutDetail(ai) {
     var signal = ai.signal || "WAIT";
     var verdictEl  = document.getElementById("pd-signal-out-verdict");
     var iconEl     = document.getElementById("pd-signal-out-icon");
     var labelEl    = document.getElementById("pd-signal-out-label");
+    var ageEl      = document.getElementById("pd-signal-age");
     var entryRow   = document.getElementById("pd-entry-row");
     var stopRow    = document.getElementById("pd-stop-row");
     var tpRow      = document.getElementById("pd-tp-row");
     var rrRow      = document.getElementById("pd-rr-row");
+    var distRow    = document.getElementById("pd-dist-row");
+    var fpRow      = document.getElementById("pd-fp-row");
+    var confWrap   = document.getElementById("pd-conf-wrap");
+    var confBar    = document.getElementById("pd-conf-bar");
+    var confPct    = document.getElementById("pd-conf-pct");
 
     if (!verdictEl) return;
 
     if (signal === "LONG" || signal === "SHORT") {
-      var d = digitsFor(ai.entry || ai.price || 1);
-      verdictEl.className = "pipe-signal-out-verdict " + (signal === "LONG" ? "sig-long" : "sig-short");
-      if (iconEl)  iconEl.textContent  = signal === "LONG" ? "▲" : "▼";
-      if (labelEl) labelEl.textContent = signal + " · " + (ai.confidence || 0) + "% confidence";
+      _signalFireTime = Date.now();
+      var d    = digitsFor(ai.entry || ai.price || 1);
+      var conf = ai.confidence || 0;
+      var isLong = signal === "LONG";
+      verdictEl.className = "pipe-signal-out-verdict " + (isLong ? "sig-long" : "sig-short");
+      if (iconEl)  iconEl.textContent  = isLong ? "▲" : "▼";
+      if (labelEl) labelEl.textContent = signal + " · " + conf + "% confidence";
+      if (ageEl)   ageEl.textContent   = "just now";
+
+      // Confidence bar
+      if (confWrap) confWrap.style.display = "";
+      if (confBar) {
+        var confColor = conf >= 75 ? "#22c55e" : conf >= 55 ? "#f59e0b" : "#ef4444";
+        confBar.style.setProperty("--conf", conf + "%");
+        confBar.style.setProperty("--conf-color", confColor);
+      }
+      if (confPct) confPct.textContent = conf + "%";
+
       if (entryRow) { entryRow.style.display = ""; document.getElementById("pd-entry").textContent = fmt(ai.entry, d); }
       if (stopRow)  { stopRow.style.display  = ""; document.getElementById("pd-stop").textContent  = fmt(ai.stop,  d); }
       if (tpRow) {
@@ -891,20 +967,59 @@
         document.getElementById("pd-tp").textContent =
           fmt(ai.tp1, d) + (ai.tp2 ? " / " + fmt(ai.tp2, d) : "");
       }
+
+      // R:R with colour coding
+      var rrEl = document.getElementById("pd-rr");
       if (rrRow && ai.risk_reward != null) {
         rrRow.style.display = "";
-        document.getElementById("pd-rr").textContent = ai.risk_reward + ":1";
+        var rr = parseFloat(ai.risk_reward) || 0;
+        var rrCls = rr >= 2 ? "rr-good" : rr >= 1 ? "rr-ok" : "rr-poor";
+        if (rrEl) { rrEl.textContent = rr + ":1"; rrEl.className = "pipe-detail-val " + rrCls; }
       } else if (rrRow) {
         rrRow.style.display = "none";
       }
+
+      // Entry distance from current price
+      if (distRow) {
+        var currPrice = targetPrice || shownPrice;
+        if (currPrice && ai.entry) {
+          var distPct = ((ai.entry - currPrice) / currPrice * 100);
+          var distStr = (distPct >= 0 ? "+" : "") + distPct.toFixed(2) + "% from price";
+          var distEl = document.getElementById("pd-dist");
+          distRow.style.display = "";
+          if (distEl) distEl.textContent = distStr;
+        } else {
+          distRow.style.display = "none";
+        }
+      }
+
+      // Footprint levels if available in last snapshot overlays
+      if (fpRow) {
+        var fpData = _lastFootprint;
+        if (fpData && (fpData.poc || fpData.vah || fpData.val)) {
+          var dp = digitsFor(fpData.poc || 1);
+          var fpEl = document.getElementById("pd-fp");
+          fpRow.style.display = "";
+          if (fpEl) fpEl.textContent =
+            "POC " + fmt(fpData.poc, dp) + "  VAH " + fmt(fpData.vah, dp) + "  VAL " + fmt(fpData.val, dp);
+        } else {
+          fpRow.style.display = "none";
+        }
+      }
+
     } else {
+      _signalFireTime = 0;
       verdictEl.className = "pipe-signal-out-verdict sig-wait";
       if (iconEl)  iconEl.textContent  = "◎";
       if (labelEl) labelEl.textContent = "WAIT — no trade setup";
-      if (entryRow) entryRow.style.display = "none";
-      if (stopRow)  stopRow.style.display  = "none";
-      if (tpRow)    tpRow.style.display    = "none";
-      if (rrRow)    rrRow.style.display    = "none";
+      if (ageEl)   ageEl.textContent   = "";
+      if (confWrap)  confWrap.style.display = "none";
+      if (entryRow)  entryRow.style.display = "none";
+      if (stopRow)   stopRow.style.display  = "none";
+      if (tpRow)     tpRow.style.display    = "none";
+      if (rrRow)     rrRow.style.display    = "none";
+      if (distRow)   distRow.style.display  = "none";
+      if (fpRow)     fpRow.style.display    = "none";
     }
   }
 
@@ -1206,7 +1321,7 @@
       var msg = sigFilterMode === "symbol"
         ? "No AI signals for " + (symbolEl.value || "this symbol") + " yet"
         : "No AI signals yet — watching for high-quality setups…";
-      empty.innerHTML = "<td colspan='6'>" + msg + "</td>";
+      empty.innerHTML = "<td colspan='7'>" + msg + "</td>";
       tbody.appendChild(empty);
       sigCountEl.textContent = "";
       return;
@@ -1257,12 +1372,27 @@
           '<span class="conf-num ' + confCls + '">' + conf + "%</span>" +
         "</div>";
 
+      // Highlight row if it's the current symbol
+      if (row.symbol && symbolEl && row.symbol === symbolEl.value) {
+        tr.classList.add("ai-sig-row-current");
+      }
+
+      // Mini inline bar td
+      var barTd = document.createElement("td");
+      barTd.className = "ai-sig-col-bar";
+      barTd.innerHTML =
+        '<div class="ai-sig-conf-bar-wrap">' +
+          '<div class="ai-sig-conf-bar-fill" style="width:' + Math.max(3, conf) + '%;background:' +
+            (conf >= 75 ? "#22c55e" : conf >= 55 ? "#f59e0b" : "#ef4444") + '"></div>' +
+        '</div>';
+
       tr.appendChild(timeEl);
       tr.appendChild(symTd);
       tr.appendChild(tfTd);
       tr.appendChild(setupTd);
       tr.appendChild(dirTd);
       tr.appendChild(confTd);
+      tr.appendChild(barTd);
       tbody.appendChild(tr);
 
       tr.addEventListener("click", function () {
@@ -1326,14 +1456,27 @@
   function toast(s) {
     var t = document.createElement("div");
     t.className = "toast " + s.direction.toLowerCase();
+    var d = digitsFor(s.price || 1);
+    var levelsHtml = "";
+    if (s.entry != null || s.stop != null || s.tp1 != null) {
+      var dp = digitsFor(s.entry || s.price || 1);
+      levelsHtml = '<div class="toast-levels">' +
+        (s.entry != null ? '<span class="toast-lv-k">Entry</span><span class="toast-lv-v">' + fmt(s.entry, dp) + '</span>' : '') +
+        (s.stop  != null ? '<span class="toast-lv-k">Stop</span><span class="toast-lv-v">'  + fmt(s.stop,  dp) + '</span>' : '') +
+        (s.tp1   != null ? '<span class="toast-lv-k">TP</span><span class="toast-lv-v">'    + fmt(s.tp1,   dp) + (s.tp2 ? ' / ' + fmt(s.tp2, dp) : '') + '</span>' : '') +
+        (s.risk_reward != null ? '<span class="toast-lv-k">R:R</span><span class="toast-lv-v">' + s.risk_reward + ':1</span>' : '') +
+      '</div>';
+    }
     t.innerHTML =
-      '<span class="toast-dir">' + s.direction + (s.strength ? " · " + s.strength : "") + "</span>" +
-      '<span class="toast-meta">' + s.symbol + " " + (s.interval || "") + " @ " + fmt(s.price, digitsFor(s.price)) + "</span>";
+      '<span class="toast-dir">' + s.direction + (s.strength ? " · " + s.strength : "") + '</span>' +
+      '<span class="toast-meta">' + s.symbol + " " + (s.interval || "") + " @ " + fmt(s.price, d) + " · " + (s.score || 0) + "% conf</span>" +
+      levelsHtml;
     toastsEl.appendChild(t);
+    var dur = (s.score || 0) >= 75 ? 9000 : 6000;
     setTimeout(function () {
       t.classList.add("toast-out");
       setTimeout(function () { t.remove(); }, 400);
-    }, 6000);
+    }, dur);
   }
 
   /* ── Pending Limit Orders ───────────────────────────────────────────────── */
@@ -1498,8 +1641,16 @@
       chip.title = c.symbol + "  |  Vol: $" + c.volume_usdt + "M  |  H/L ±" + c.amp_pct + "%  |  Score: " + c.score;
 
       // Click → switch to this coin
+      // Mark active coin
+      if (symbolEl && c.symbol === symbolEl.value) {
+        chip.classList.add("sc-active");
+      }
       chip.addEventListener("click", function () {
         if (!symbolEl) return;
+        // Remove active from previous
+        var prev = container.querySelector(".sc-active");
+        if (prev) prev.classList.remove("sc-active");
+        chip.classList.add("sc-active");
         // Add option if not already in dropdown
         var found = false;
         for (var i = 0; i < symbolEl.options.length; i++) {
@@ -1604,8 +1755,10 @@
     ws = new WebSocket(proto + "//" + location.host + "/ws");
 
     ws.onopen = function () {
-      reconnectDelay = 1000;
+      reconnectDelay = 1500;
       liveDot.className = "dot live";
+      var _rlEl = document.getElementById("reconnect-label");
+      if (_rlEl) _rlEl.textContent = "";
       if (symbolEl.value) subscribe();
       clearInterval(pingTimer);
       pingTimer = setInterval(function () {
@@ -1685,6 +1838,8 @@
     ws.onclose = function () {
       liveDot.className = "dot err";
       clearInterval(pingTimer);
+      var rlEl = document.getElementById("reconnect-label");
+      if (rlEl) rlEl.textContent = "reconnecting…";
       setTimeout(connect, reconnectDelay);
       reconnectDelay = Math.min(reconnectDelay * 2, 15000);
     };

@@ -909,6 +909,121 @@ select:hover { border-color: #38bdf8; }
 }
 
 
+
+/* ── price sparkline ────────────────────────────────────────────────────── */
+.price-spark {
+  display: block;
+  margin-top: 2px;
+  opacity: 0.7;
+  border-radius: 2px;
+}
+
+/* ── reconnect label ────────────────────────────────────────────────────── */
+.reconnect-label {
+  font-size: .68rem;
+  color: #f59e0b;
+  letter-spacing: .04em;
+  animation: reconnect-blink 1.2s ease-in-out infinite;
+}
+.reconnect-label:empty { display: none; }
+@keyframes reconnect-blink {
+  0%,100% { opacity: 1; }
+  50%      { opacity: 0.3; }
+}
+
+/* ── confidence bar (signal-out panel) ──────────────────────────────────── */
+.pd-conf-wrap {
+  display: flex; align-items: center; gap: 7px;
+  margin: 4px 0 8px;
+}
+.pd-conf-bar {
+  flex: 1; height: 5px;
+  background: #1f2a37;
+  border-radius: 99px;
+  overflow: hidden;
+  position: relative;
+}
+.pd-conf-bar::after {
+  content: '';
+  position: absolute; inset-block: 0; left: 0;
+  width: var(--conf, 0%);
+  border-radius: 99px;
+  background: var(--conf-color, #38bdf8);
+  transition: width .6s cubic-bezier(.4,0,.2,1), background .4s;
+}
+.pd-conf-pct {
+  font-size: .68rem; font-weight: 700;
+  color: #94a3b8;
+  white-space: nowrap;
+  min-width: 32px;
+  text-align: right;
+}
+
+/* ── signal age ─────────────────────────────────────────────────────────── */
+.pd-signal-age {
+  font-size: .62rem;
+  color: #4b5563;
+  margin-left: auto;
+  white-space: nowrap;
+}
+.pd-signal-age:empty { display: none; }
+
+/* ── pipe signal-out verdict row alignment ──────────────────────────────── */
+.pipe-signal-out-verdict {
+  display: flex; align-items: center; gap: 7px;
+  flex-wrap: wrap;
+}
+
+/* ── whale tape ─────────────────────────────────────────────────────────── */
+.tape.whale {
+  color: #f59e0b !important;
+  font-weight: 700;
+  animation: whale-flash 0.4s ease;
+}
+@keyframes whale-flash {
+  0%   { text-shadow: 0 0 12px rgba(245,158,11,.8); }
+  100% { text-shadow: none; }
+}
+
+/* ── scanner active coin ────────────────────────────────────────────────── */
+button.scanner-coin.sc-active {
+  border-color: #38bdf8 !important;
+  background: rgba(56,189,248,.1) !important;
+  box-shadow: 0 0 0 1px rgba(56,189,248,.3);
+}
+button.scanner-coin.sc-active .sc-name { color: #38bdf8; }
+
+/* ── AI signals table confidence bar ───────────────────────────────────── */
+.ai-sig-col-bar { width: 60px; }
+.ai-sig-conf-bar-wrap {
+  width: 54px; height: 4px;
+  background: #1f2a37;
+  border-radius: 99px;
+  overflow: hidden;
+}
+.ai-sig-conf-bar-fill {
+  height: 100%;
+  border-radius: 99px;
+  background: #38bdf8;
+  transition: width .4s;
+}
+.ai-sig-row-current td { background: rgba(56,189,248,.05); }
+
+/* ── enhanced toast ─────────────────────────────────────────────────────── */
+.toast-levels {
+  display: flex; gap: 10px; flex-wrap: wrap;
+  font-size: .67rem;
+  margin-top: 3px;
+  opacity: 0.85;
+}
+.toast-lv-k { color: #4b5563; text-transform: uppercase; font-size: .6rem; }
+.toast-lv-v { color: #e2e8f0; font-weight: 600; }
+
+/* ── R:R colour coding ──────────────────────────────────────────────────── */
+.rr-good  { color: #22c55e !important; font-weight: 700; }
+.rr-ok    { color: #f59e0b !important; font-weight: 700; }
+.rr-poor  { color: #ef4444 !important; }
+
 /* ── exchange toggle ────────────────────────────────────────────────────── */
 .exchange-toggle {
   display: flex; gap: 2px;

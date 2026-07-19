@@ -16,6 +16,7 @@
   <header class="topbar">
     <div class="brand">
       <span class="dot" id="live-dot" aria-hidden="true"></span>
+      <span class="reconnect-label" id="reconnect-label" aria-live="polite"></span>
       <h1>SIGNAL<span>BOT</span></h1>
       <span class="latency" id="latency" title="WebSocket round-trip latency"></span>
     </div>
@@ -40,6 +41,7 @@
           <span class="big-price" id="price">&mdash;</span>
           <span class="chg" id="chg"></span>
         </div>
+        <canvas class="price-spark" id="price-spark" width="140" height="26" aria-hidden="true"></canvas>
         <!-- Buy/sell pressure bar -->
         <div class="pressure-wrap" title="Buy vs sell volume pressure">
           <div class="pressure-bar">
@@ -259,6 +261,11 @@
           <div class="pipe-signal-out-verdict" id="pd-signal-out-verdict">
             <span class="pipe-signal-out-icon" id="pd-signal-out-icon">◎</span>
             <span class="pipe-signal-out-label" id="pd-signal-out-label">Waiting for signal…</span>
+            <span class="pd-signal-age" id="pd-signal-age"></span>
+          </div>
+          <div class="pd-conf-wrap" id="pd-conf-wrap" style="display:none">
+            <div class="pd-conf-bar" id="pd-conf-bar"></div>
+            <span class="pd-conf-pct" id="pd-conf-pct"></span>
           </div>
           <div class="pipe-detail-row" id="pd-entry-row" style="display:none">
             <span class="pipe-detail-key">Entry</span>
@@ -275,6 +282,14 @@
           <div class="pipe-detail-row" id="pd-rr-row" style="display:none">
             <span class="pipe-detail-key">R:R</span>
             <span class="pipe-detail-val" id="pd-rr">—</span>
+          </div>
+          <div class="pipe-detail-row" id="pd-dist-row" style="display:none">
+            <span class="pipe-detail-key">Entry Dist.</span>
+            <span class="pipe-detail-val" id="pd-dist">—</span>
+          </div>
+          <div class="pipe-detail-row" id="pd-fp-row" style="display:none">
+            <span class="pipe-detail-key">Footprint</span>
+            <span class="pipe-detail-val" id="pd-fp">—</span>
           </div>
         </div>
       </div>
@@ -383,6 +398,7 @@
               <th>Setup</th>
               <th>Direction</th>
               <th>Conf</th>
+              <th class="ai-sig-col-bar"></th>
             </tr>
           </thead>
           <tbody id="ai-sig-tbody">
