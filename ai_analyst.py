@@ -744,9 +744,21 @@ class AIAnalyst:
                 err = resp.json().get("error", {}) or {}
             except ValueError:
                 err = {}
-            code    = str(err.get("code") or "")
-            err_msg = str(err.get("message") or "").lower()
-            if code == "json_validate_failed" or "max_tokens" in err_msg or "max completion tokens" in err_msg:
+            code       = str(err.get("code") or "")
+            err_msg    = str(err.get("message") or "").lower()
+            failed_gen = str(err.get("failed_generation") or "")
+            is_token_limit = "max_tokens" in err_msg or "max completion tokens" in err_msg
+            if code == "json_validate_failed":
+                if not failed_gen.strip():
+                    # Model produced nothing — it doesn't support JSON mode reliably.
+                    # Treat as a model error so the cooldown kicks in and the next
+                    # model is tried rather than crashing the whole call.
+                    raise RuntimeError(f"MODEL_ERROR:{model}: json_validate_failed (empty generation) {resp.text[:80]}")
+                else:
+                    # Model produced something but it was malformed JSON — likely a
+                    # token-limit truncation in mid-stream.  Retry with fewer tokens.
+                    raise RuntimeError(f"TRUNCATED:{model}: {resp.text[:160]}")
+            if is_token_limit:
                 raise RuntimeError(f"TRUNCATED:{model}: {resp.text[:160]}")
             raise RuntimeError(f"MODEL_ERROR:{model}: {resp.status_code} {resp.text[:80]}")
         if resp.status_code == 404:
@@ -841,6 +853,21 @@ class AIAnalyst:
                     self._model_rl_until[model] = time.time() + self._MODEL_RL_SECONDS
                     if self._or_model == model:
                         self._or_model = None
+                    self._record_evt(
+                        stage="model_error", provider="groq", model=model,
+                        cooldown_s=self._MODEL_RL_SECONDS,
+                    )
+                    continue
+                if msg.startswith("TRUNCATED:"):
+                    # Both token budgets exhausted for this model — skip it with a
+                    # short cooldown and try the next model rather than crashing.
+                    self._model_rl_until[model] = time.time() + self._JSON_FAIL_COOLDOWN
+                    if self._or_model == model:
+                        self._or_model = None
+                    self._record_evt(
+                        stage="model_truncated", provider="groq", model=model,
+                        cooldown_s=self._JSON_FAIL_COOLDOWN,
+                    )
                     continue
                 raise
             except requests.RequestException as e:
