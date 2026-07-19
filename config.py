@@ -107,6 +107,7 @@ LIMIT_SIGNALS_ENABLED = True
 
 # ---- Coin scanner — focused on fast movers, not slow large-caps ----
 SCANNER_ENABLED           = True
+ACTIVE_EXCHANGE           = "spot"   # "spot" or "futures" (Binance USDT-M perps)
 SCANNER_INTERVAL          = 240        # scan every 4 minutes
 SCANNER_MIN_VOLUME_USDT   = 3_000_000  # $3 M minimum — catch micro-cap rockets
 SCANNER_VOLATILITY_MIN_PCT = 4.0       # 4%+ 24h move — only real movers

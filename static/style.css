@@ -803,6 +803,7 @@ select:hover { border-color: #38bdf8; }
 }
 .scanner-empty { font-size: .78rem; color: #374151; padding: 6px 0; }
 .scanner-coin {
+  cursor: pointer;
   display: flex; flex-direction: column; gap: 4px;
   background: #1a2230; border: 1px solid #1f2a37; border-radius: 8px;
   padding: 10px 12px; cursor: pointer; min-width: 110px;
@@ -905,6 +906,57 @@ select:hover { border-color: #38bdf8; }
 .pl-v  { font-size: .82rem; font-weight: 600; color: #94a3b8; }
 .pl-meta {
   font-size: .72rem; color: #4b5563; line-height: 1.4;
+}
+
+
+/* ── exchange toggle ────────────────────────────────────────────────────── */
+.exchange-toggle {
+  display: flex; gap: 2px;
+  background: #0b0f14;
+  border: 1px solid #1f2a37;
+  border-radius: 6px;
+  padding: 2px;
+  flex-shrink: 0;
+}
+.exch-btn {
+  background: transparent;
+  border: none;
+  color: #4b5563;
+  font-family: inherit;
+  font-size: .7rem;
+  font-weight: 600;
+  letter-spacing: .06em;
+  padding: 3px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background .15s, color .15s;
+  white-space: nowrap;
+}
+.exch-btn:hover { background: #1e2a3a; color: #94a3b8; }
+.exch-btn.active {
+  background: #1e2a3a;
+  color: #38bdf8;
+  box-shadow: 0 0 0 1px rgba(56,189,248,.25);
+}
+
+/* ── scanner coin chips as buttons ──────────────────────────────────────── */
+button.scanner-coin {
+  /* reset button defaults */
+  appearance: none;
+  -webkit-appearance: none;
+  font-family: inherit;
+  text-align: left;
+  width: auto;
+  /* active feedback */
+  transition: background .15s, border-color .15s, transform .1s, box-shadow .15s;
+}
+button.scanner-coin:active {
+  transform: scale(0.97);
+  box-shadow: 0 0 0 2px rgba(56,189,248,.35);
+}
+button.scanner-coin:focus-visible {
+  outline: 2px solid #38bdf8;
+  outline-offset: 2px;
 }
 
 /* ── footer ─────────────────────────────────────────────────────────────── */

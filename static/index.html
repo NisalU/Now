@@ -77,6 +77,10 @@
           <h2>🔥 Volatile Coin Scanner</h2>
         </div>
         <div class="scanner-meta">
+          <div class="exchange-toggle" id="exchange-toggle" title="Switch between Binance Spot and Perpetual Futures">
+            <button class="exch-btn active" id="exch-spot"    data-exchange="spot">SPOT</button>
+            <button class="exch-btn"        id="exch-futures" data-exchange="futures">PERP</button>
+          </div>
           <span class="scanner-count-badge" id="scanner-count">—</span>
           <span class="scanner-time" id="scanner-time"></span>
           <button class="scan-btn" id="scan-btn" title="Fetch fresh volatile coins from Binance">⟳ Scan Now</button>

@@ -179,6 +179,29 @@ async def api_scanner_scan(request: web.Request) -> web.Response:
     triggered = scanner.trigger_scan()
     return web.json_response({"ok": triggered, "already_scanning": not triggered})
 
+
+async def api_exchange(request: web.Request) -> web.Response:
+    """GET → current exchange. POST {exchange: 'spot'|'futures'} → switch."""
+    if request.method == 'GET':
+        return web.json_response({'exchange': getattr(config, 'ACTIVE_EXCHANGE', 'spot')})
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({'error': 'invalid JSON'}, status=400)
+    exchange = body.get('exchange', 'spot')
+    if exchange not in ('spot', 'futures'):
+        return web.json_response({'error': 'use spot or futures'}, status=400)
+    config.ACTIVE_EXCHANGE = exchange
+    # Clear engine state so next request fetches from the new exchange
+    with engine._lock:
+        engine._state.clear()
+    # Broadcast to all clients
+    _ws_broadcast({'type': 'exchange_changed', 'exchange': exchange})
+    # Trigger a fresh scan for the new exchange
+    if scanner:
+        scanner.trigger_scan()
+    return web.json_response({'ok': True, 'exchange': exchange})
+
 async def api_pending_limits(request: web.Request) -> web.Response:
     """Return pending LIMIT order signals (waiting for price to reach entry)."""
     symbol = request.query.get("symbol")
@@ -234,6 +257,7 @@ async def ws_endpoint(request: web.Request) -> web.WebSocketResponse:
             "default_interval":   config.DEFAULT_INTERVAL,
             "threshold":          config.SIGNAL_THRESHOLD,
             "ai_refresh_seconds": config.AI_REFRESH_SECONDS,
+            "exchange":           getattr(config, "ACTIVE_EXCHANGE", "spot"),
         })
         if config.ENGINE_SIGNAL_FEED:
             client.send({"type": "signals", "data": list(reversed(engine.signals[-50:]))})
@@ -308,6 +332,16 @@ async def ws_endpoint(request: web.Request) -> web.WebSocketResponse:
                 # Manual coin scan triggered by user button
                 if scanner:
                     scanner.trigger_scan()
+
+            elif kind == "set_exchange":
+                exchange = msg.get("exchange", "spot")
+                if exchange in ("spot", "futures"):
+                    config.ACTIVE_EXCHANGE = exchange
+                    with engine._lock:
+                        engine._state.clear()
+                    _ws_broadcast({"type": "exchange_changed", "exchange": exchange})
+                    if scanner:
+                        scanner.trigger_scan()
 
     finally:
         send_task.cancel()
@@ -539,6 +573,8 @@ def create_app() -> web.Application:
     app.router.add_get("/api/pending-limits",     api_pending_limits)
     app.router.add_get("/api/scanner",            api_scanner)
     app.router.add_post("/api/scanner/scan",       api_scanner_scan)
+    app.router.add_get("/api/exchange",             api_exchange)
+    app.router.add_post("/api/exchange",            api_exchange)
     app.router.add_get("/ws",                     ws_endpoint)
     app.router.add_static("/static", BASE_DIR / "static", name="static")
     app.on_startup.append(on_startup)

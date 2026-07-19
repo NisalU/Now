@@ -28,6 +28,9 @@ _TICKER_ENDPOINTS = [
     "https://api2.binance.com/api/v3/ticker/24hr",
     "https://data-api.binance.vision/api/v3/ticker/24hr",
 ]
+_FUTURES_TICKER_ENDPOINTS = [
+    "https://fapi.binance.com/fapi/v1/ticker/24hr",
+]
 
 # Base tokens to always exclude regardless of volume (stables, leveraged, ETFs)
 _EXCLUDE_BASES = {
@@ -81,8 +84,10 @@ class CoinScanner:
 
     def scan(self) -> list:
         """Fetch 24hr tickers; return sorted list of volatile USDT pairs."""
+        use_futures = getattr(config, "ACTIVE_EXCHANGE", "spot") == "futures"
+        endpoints   = _FUTURES_TICKER_ENDPOINTS if use_futures else _TICKER_ENDPOINTS
         raw = None
-        for url in _TICKER_ENDPOINTS:
+        for url in endpoints:
             try:
                 resp = requests.get(url, timeout=12)
                 if resp.status_code == 200:

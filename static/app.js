@@ -1483,7 +1483,8 @@
       var chgSign = c.change_pct >= 0 ? "+" : "";
       var d       = digitsFor(c.price || 1);
 
-      var chip = document.createElement("div");
+      var chip = document.createElement("button");
+      chip.type = "button";
       chip.className = cls;
       chip.innerHTML =
         '<span class="sc-rank">' + icon + " #" + rank + "</span>" +
@@ -1621,6 +1622,7 @@
           fillSelect(symbolEl,   m.symbols,   m.default_symbol);
           fillSelect(intervalEl, m.intervals, m.default_interval);
           if (m.ai_refresh_seconds) _aiIntervalSec = m.ai_refresh_seconds;
+          if (m.exchange) setExchangeToggle(m.exchange);
           break;
         case "snapshot":
           if (m.data.symbol === symbolEl.value && m.data.interval === intervalEl.value)
@@ -1661,6 +1663,9 @@
           break;
         case "scanner_update":
           renderScanner(m.data);
+          break;
+        case "exchange_changed":
+          onExchangeChanged(m.exchange);
           break;
         case "pipeline_log":
           renderPipelineEvents(m.data);
@@ -1737,6 +1742,59 @@
   symbolEl.addEventListener("change",  function () { localStorage.setItem(LS_SYM, symbolEl.value);   reset(); });
   intervalEl.addEventListener("change", function () { localStorage.setItem(LS_INT, intervalEl.value); reset(); });
 
+
+  /* ── Exchange toggle ─────────────────────────────────────────────────── */
+  var _currentExchange = "spot";
+
+  function setExchangeToggle(exchange) {
+    _currentExchange = exchange || "spot";
+    var spotBtn = document.getElementById("exch-spot");
+    var futBtn  = document.getElementById("exch-futures");
+    if (!spotBtn || !futBtn) return;
+    if (_currentExchange === "futures") {
+      spotBtn.classList.remove("active");
+      futBtn.classList.add("active");
+    } else {
+      spotBtn.classList.add("active");
+      futBtn.classList.remove("active");
+    }
+  }
+
+  function onExchangeChanged(exchange) {
+    setExchangeToggle(exchange);
+    // Clear scanner list while new results load
+    var container = document.getElementById("scanner-list");
+    if (container) container.innerHTML = '<div class="scanner-empty">Switching to ' + (exchange === "futures" ? "Perpetual Futures" : "Spot") + ' — scanning…</div>';
+    var hintEl = document.getElementById("scanner-status-hint");
+    if (hintEl) hintEl.textContent = "Switched to " + (exchange === "futures" ? "Binance PERP" : "Binance Spot") + " — scanning…";
+    // Also reset the current chart since exchange changed
+    reset();
+  }
+
+  function initExchangeToggle() {
+    var toggle = document.getElementById("exchange-toggle");
+    if (!toggle) return;
+    toggle.addEventListener("click", function (e) {
+      var btn = e.target.closest(".exch-btn");
+      if (!btn) return;
+      var exchange = btn.dataset.exchange;
+      if (!exchange || exchange === _currentExchange) return;
+      // Send via WebSocket (fastest path)
+      if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: "set_exchange", exchange: exchange }));
+      } else {
+        // Fallback to REST
+        fetch("/api/exchange", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ exchange: exchange })
+        });
+      }
+      setExchangeToggle(exchange);
+    });
+  }
+
+  initExchangeToggle();
   initScanBtn();
   connect();
 })();

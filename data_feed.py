@@ -98,12 +98,18 @@ def _get(base_candidates, cached, path, params, signed=False):
 
 def get_klines(symbol, interval, limit=None):
     """Return list of candle dicts (oldest -> newest)."""
-    global _spot_base
+    global _spot_base, _fut_base
     limit = limit or config.KLINE_LIMIT
-    raw, _spot_base = _get(
-        config.SPOT_ENDPOINTS, _spot_base, "/api/v3/klines",
-        {"symbol": symbol, "interval": interval, "limit": limit},
-    )
+    if getattr(config, "ACTIVE_EXCHANGE", "spot") == "futures":
+        raw, _fut_base = _get(
+            config.FUTURES_ENDPOINTS, _fut_base, "/fapi/v1/klines",
+            {"symbol": symbol, "interval": interval, "limit": limit},
+        )
+    else:
+        raw, _spot_base = _get(
+            config.SPOT_ENDPOINTS, _spot_base, "/api/v3/klines",
+            {"symbol": symbol, "interval": interval, "limit": limit},
+        )
     candles = []
     for k in raw:
         vol = float(k[5])
@@ -122,15 +128,20 @@ def get_klines(symbol, interval, limit=None):
 
 
 def get_ticker(symbol):
-    global _spot_base
+    global _spot_base, _fut_base
     now = time.time()
     with _cache_lock:
         hit = _ticker_cache.get(symbol)
         if hit and hit[0] > now:
             return hit[1]
-    data, _spot_base = _get(
-        config.SPOT_ENDPOINTS, _spot_base, "/api/v3/ticker/24hr", {"symbol": symbol}
-    )
+    if getattr(config, "ACTIVE_EXCHANGE", "spot") == "futures":
+        data, _fut_base = _get(
+            config.FUTURES_ENDPOINTS, _fut_base, "/fapi/v1/ticker/24hr", {"symbol": symbol}
+        )
+    else:
+        data, _spot_base = _get(
+            config.SPOT_ENDPOINTS, _spot_base, "/api/v3/ticker/24hr", {"symbol": symbol}
+        )
     out = {
         "last": float(data["lastPrice"]),
         "change_pct": float(data["priceChangePercent"]),
