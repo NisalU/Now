@@ -26,6 +26,14 @@ manager    = None  # type: ignore[assignment]
 scanner    = None  # type: ignore[assignment]
 
 
+def _ws_broadcast(msg: dict) -> None:
+    """Push a message to every connected WebSocket client."""
+    if manager is None:
+        return
+    for c in list(manager.clients):
+        c.send(msg)
+
+
 # ---------------------------------------------------------------------------
 # Terminal key prompting
 # ---------------------------------------------------------------------------
@@ -535,9 +543,6 @@ async def on_startup(app: web.Application) -> None:
         print("[binance] No API key — public endpoints only")
     # Start coin scanner
     if getattr(config, "SCANNER_ENABLED", True) and scanner:
-        def _ws_broadcast(msg):
-            for c in list(manager.clients):
-                c.send(msg)
         scanner.set_broadcaster(_ws_broadcast)
         # Run initial scan in background; manual scans are user-triggered after that
         import threading as _threading
