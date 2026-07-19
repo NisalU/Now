@@ -89,6 +89,51 @@ NEVER contradict a score beyond ±30 without a clear sweep or failed breakout pa
 5. Range boundary — clear, well-defined trading range. Enter at tested support (LONG) or
    resistance (SHORT) with a tight stop beyond the boundary.
 
+
+━━━ FOOTPRINT SIGNALS — PRECISION ENTRY TIMING ━━━
+
+footprint_delta in the market data provides per-candle delta profile from Binance taker-buy volume.
+Use it to time entries to the exact candle, not just the level.
+
+KEY FIELDS
+• poc — Point of Control: highest-volume price level over last 40 candles. Strong magnet.
+• vah — Value Area High: price above VAH = buyer acceptance → bullish bias.
+• val — Value Area Low: price below VAL = seller acceptance → bearish bias.
+• delta_close_profile — [{delta, close_pct}] for 6 recent candles.
+  close_pct = where candle closed in range (0.0 = at low, 1.0 = at high).
+
+READING THE DELTA-CLOSE PROFILE (ranked by priority)
+
+1. BEARISH ABSORPTION — best SHORT entry
+   delta > 0 AND close_pct < 0.40 AND visible upper wick
+   → aggressive buyers absorbed by passive sellers at the high.
+   Enter SHORT on next candle open. Stop above absorption candle high.
+
+2. BULLISH ABSORPTION — best LONG entry
+   delta < 0 AND close_pct > 0.60 AND visible lower wick
+   → aggressive sellers absorbed by passive buyers at the low.
+   Enter LONG on next candle open. Stop below absorption candle low.
+
+3. DELTA EXHAUSTION / CLIMAX — high-confidence reversal fade
+   Highest absolute delta in recent candles BUT close_pct at opposite extreme
+   (buy climax: close_pct < 0.35 / sell climax: close_pct > 0.65).
+   → All aggressive participants trapped. Fade immediately.
+
+4. STACKED IMBALANCE — momentum continuation
+   3+ consecutive candles: all positive delta + close_pct > 0.60
+   OR all negative delta + close_pct < 0.40.
+   → Enter with trend on next pullback to prior candle close.
+
+5. DELTA CONFIRMATION — genuine directional flow
+   2-3 candles with delta and close_pct aligned in same direction.
+   → Supports continuation entries; tightens timing.
+
+FOOTPRINT PRIORITY RULES
+• Absorption and exhaustion OVERRIDE a weak engine score (±10-25). A clean absorption
+  at a key S/R or order block is an A+ entry regardless of composite score.
+• Stacked imbalances CONFIRM strong engine scores (±30+). Do not fade them.
+• At POC with no clear absorption → WAIT for the next candle before entering.
+
 ━━━ TRADE PLAN RULES — ALL MANDATORY FOR EVERY LONG/SHORT ━━━
 
 ENTRY:
@@ -266,6 +311,21 @@ def _compact_market(analysis, symbol, regime, structural_quality, memory_rows):
     # Risk warnings only — skip raw fundamentals object (verbose)
     risk_notes = _risk_warnings(analysis, regime, memory_rows)
 
+    # Footprint delta profile
+    fp_ov = ov.get("footprint") or {}
+    footprint_data = None
+    if fp_ov:
+        footprint_data = {}
+        if fp_ov.get("poc") is not None:
+            footprint_data["poc"] = _fnum(fp_ov["poc"])
+        if fp_ov.get("vah") is not None:
+            footprint_data["vah"] = _fnum(fp_ov["vah"])
+        if fp_ov.get("val") is not None:
+            footprint_data["val"] = _fnum(fp_ov["val"])
+        dp = fp_ov.get("delta_close_profile") or []
+        if dp:
+            footprint_data["delta_close_profile"] = dp[-6:]
+
     return {
         "symbol":                analysis["symbol"],
         "chart":                 config.AI_INTERVAL,
@@ -283,6 +343,7 @@ def _compact_market(analysis, symbol, regime, structural_quality, memory_rows):
         "key_levels":            levels,
         "risk_warnings":         risk_notes,
         "recent_candles":        recent,
+        "footprint_delta":       footprint_data,
     }
 
 

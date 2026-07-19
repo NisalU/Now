@@ -9,8 +9,8 @@ import traceback
 
 import config
 import data_feed
-from strategies import (auction, ema_trend, fibonacci, fundamentals, liquidity,
-                        orderflow, patterns, smc, support_resistance, trendlines)
+from strategies import (auction, ema_trend, fibonacci, footprint, fundamentals,
+                        liquidity, orderflow, patterns, smc, support_resistance, trendlines)
 from strategies.helpers import atr
 
 SIGNALS_FILE = os.path.join(os.path.dirname(__file__), "signals.json")
@@ -26,6 +26,7 @@ STRATEGIES = {
     "orderflow_cvd": ("Orderflow / CVD", lambda c, f: orderflow.analyze(c)),
     "auction_market": ("Auction Market", lambda c, f: auction.analyze(c)),
     "fundamentals": ("Fundamentals", lambda c, f: fundamentals.analyze(c, f)),
+    "footprint":    ("Footprint Delta Profile", lambda c, f: footprint.analyze(c)),
 }
 
 

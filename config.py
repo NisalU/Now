@@ -53,6 +53,7 @@ WEIGHTS = {
     "orderflow_cvd":      14,
     "auction_market":      6,
     "fundamentals":        4,
+    "footprint":          14,   # delta absorption + stacked imbalances -> high-precision entries
 }
 
 SIGNAL_THRESHOLD = 18    # slightly lower threshold — alts are noisier
