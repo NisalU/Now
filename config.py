@@ -35,7 +35,7 @@ FUTURES_ENDPOINTS = [
     "https://fapi.binance.com",
 ]
 
-REFRESH_SECONDS = 15   # faster refresh cycle for scalp focus
+REFRESH_SECONDS = 60   # 1-minute refresh cycle
 
 # ---- Binance API credentials (optional) ----
 BINANCE_API_KEY    = ""
@@ -64,7 +64,7 @@ ENGINE_SIGNAL_FEED = False
 # ---- AI analyst — one-shot directional swing signals ----
 AI_INTERVAL      = "15m"   # primary analysis timeframe (15-min candles)
 AI_HTF_INTERVAL  = "1h"    # higher-timeframe confirmation
-AI_REFRESH_SECONDS = 45    # re-analyze every 45 s (15m candles change slowly)
+AI_REFRESH_SECONDS = 60    # re-analyze every 60 s (1-minute cycle)
 
 AI_MIN_CALL_INTERVAL = 2.1
 
@@ -85,7 +85,7 @@ SIGNAL_MEMORY_LOOKBACK = 3
 PIPELINE_LOG_MAX = 100
 
 # ---- Active-signal lock ----
-ACTIVE_SIGNAL_LOCK = True
+ACTIVE_SIGNAL_LOCK = False
 
 # ---- Market regime — calibrated for altcoin volatility ----
 REGIME_COMPRESSION_TIGHT  = 0.35  # alts compress harder before explosive moves

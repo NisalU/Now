@@ -1121,13 +1121,9 @@ class AIAnalyst:
                 })
                 self._recent_ai_signals = self._recent_ai_signals[:20]
 
-            # Lock further AI analysis until signal resolves (MARKET only)
-            # LIMIT signals are tracked as pending orders, not active locks
-            if getattr(config, "ACTIVE_SIGNAL_LOCK", True):
-                if result.get("order_type", "MARKET") == "MARKET":
-                    self._record_active_signal(symbol, result)
-                elif result.get("order_type") == "LIMIT":
-                    self.add_pending_limit(result)
+            # Track LIMIT pending orders
+            if result.get("order_type") == "LIMIT":
+                self.add_pending_limit(result)
 
         with self._lock:
             self._cache[symbol] = result
@@ -1141,25 +1137,6 @@ class AIAnalyst:
         target), skip the AI call and return the cached result annotated with
         signal_active=True.
         """
-        # Check active-signal lock
-        if getattr(config, "ACTIVE_SIGNAL_LOCK", True):
-            try:
-                analysis = engine.get_state(symbol, config.AI_INTERVAL)
-                current_price = analysis["price"]
-            except Exception:
-                current_price = None
-
-            if current_price is not None:
-                is_active, lock_reason = self._check_signal_active(symbol, current_price)
-                if is_active:
-                    cached = self.get_cached(symbol)
-                    if cached:
-                        annotated = dict(cached)
-                        annotated["signal_active"] = True
-                        annotated["signal_lock_reason"] = lock_reason
-                        log.info("[signal-lock] Skipping AI for %s — %s", symbol, lock_reason)
-                        return annotated
-
         # Normal analysis
         try:
             return self.analyze(symbol)
