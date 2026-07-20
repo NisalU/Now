@@ -35,10 +35,17 @@
 
   /* ── state ──────────────────────────────────────────────────────────────── */
   var state = {
-    panel:       "closed",   // "closed" | "list" | "create" | "edit" | "config"
+    panel:       "closed",
     strategies:  [],
     builtinConfig: null,
-    editing:     null,       // strategy id being edited
+    editing:     null,
+    autogen: {
+      generating: false,
+      mode: "signals",       // "signals" | "ai"
+      result: null,          // last generated strategy
+      aiError: null,
+      cooldownRemaining: 0,
+    },
     form: {
       name: "", description: "", weight: 8,
       signal_direction: "bullish", logic: "AND",
@@ -234,6 +241,39 @@
     .sb-threshold-group { margin-top: 18px; padding-top: 16px; border-top: 1px solid #1e2437; }
     .sb-threshold-label { font-size: 11px; color: #6b7280; margin-bottom: 5px; letter-spacing:.04em; text-transform: uppercase; }
 
+    /* Auto-generate */
+    .sb-autogen-card {
+      background: #141824; border: 1px solid #1e2437; border-radius: 10px;
+      padding: 20px; margin-bottom: 14px;
+    }
+    .sb-autogen-card h3 { font-size: 14px; font-weight: 600; color: #e8eaf0; margin: 0 0 6px; }
+    .sb-autogen-card p  { font-size: 12px; color: #6b7280; margin: 0 0 14px; line-height: 1.5; }
+    .sb-cooldown { font-size: 11px; color: #f59e0b; margin-top: 8px; }
+    .sb-ai-error { font-size: 11px; color: #f87171; background: #1f1010; border: 1px solid #3d1515;
+      border-radius: 5px; padding: 8px 10px; margin-top: 8px; }
+    .sb-preview-card {
+      background: #0e1118; border: 1px solid #2d3348; border-radius: 8px;
+      padding: 14px 16px; margin-top: 16px;
+    }
+    .sb-preview-title { font-size: 11px; color: #6b7280; letter-spacing:.04em;
+      text-transform:uppercase; margin-bottom: 10px; }
+    .sb-preview-name  { font-size: 15px; font-weight: 700; color: #e8eaf0; margin-bottom: 4px; }
+    .sb-preview-desc  { font-size: 12px; color: #6b7280; margin-bottom: 10px; }
+    .sb-preview-meta  { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+    .sb-meta-pill {
+      font-size: 11px; padding: 3px 9px; border-radius: 4px; font-weight: 600;
+    }
+    .sb-pill-green  { background: #1a3320; color: #4ade80; }
+    .sb-pill-red    { background: #2d1515; color: #f87171; }
+    .sb-pill-blue   { background: #1a1f3a; color: #818cf8; }
+    .sb-pill-amber  { background: #2a1f00; color: #f59e0b; }
+    .sb-preview-conds { font-size: 12px; color: #8b95a8; margin-bottom: 12px; }
+    .sb-preview-cond  { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+    .sb-preview-cond-dot { width:6px;height:6px;border-radius:50%;background:#5b8af5;flex-shrink:0; }
+    .sb-gen-actions { display: flex; gap: 8px; margin-top: 14px; }
+    .sb-spin { display: inline-block; animation: sb-spin 1s linear infinite; }
+    @keyframes sb-spin { to { transform: rotate(360deg); } }
+
     /* Empty state */
     .sb-empty { text-align: center; color: #4b5563; font-size: 13px; padding: 32px 0; }
 
@@ -281,6 +321,7 @@
     </div>
     <div class="sb-tabs">
       <button class="sb-tab active" data-tab="list">My Strategies</button>
+      <button class="sb-tab"        data-tab="autogen">⚡ Auto-Generate</button>
       <button class="sb-tab"        data-tab="create">Create New</button>
       <button class="sb-tab"        data-tab="config">Engine Config</button>
     </div>
@@ -494,6 +535,71 @@
     </div>`;
   }
 
+  function renderAutogenTab() {
+    var ag = state.autogen;
+    var previewHtml = "";
+    if (ag.result) {
+      var r = ag.result;
+      var dirClass = r.signal_direction === "bullish" ? "sb-pill-green" : "sb-pill-red";
+      var dirLabel = r.signal_direction === "bullish" ? "LONG" : "SHORT";
+      var sourceLabel = r.source === "ai_generated" ? "AI Generated" :
+                        r.source === "rule_learner"  ? "Signal Learner" : "Auto";
+      var condList = (r.conditions || []).map(function (c) {
+        return `<div class="sb-preview-cond"><div class="sb-preview-cond-dot"></div>${escHtml(c.label||c.type)}</div>`;
+      }).join("");
+      var logicBadge = r.logic || "AND";
+      previewHtml = `<div class="sb-preview-card">
+        <div class="sb-preview-title">Generated Strategy Preview</div>
+        <div class="sb-preview-name">${escHtml(r.name)}</div>
+        <div class="sb-preview-desc">${escHtml(r.description || "")}</div>
+        <div class="sb-preview-meta">
+          <span class="sb-meta-pill ${dirClass}">${dirLabel}</span>
+          <span class="sb-meta-pill sb-pill-blue">Weight: ${r.weight||10}</span>
+          <span class="sb-meta-pill sb-pill-blue">${logicBadge}</span>
+          <span class="sb-meta-pill sb-pill-amber">${escHtml(sourceLabel)}</span>
+          ${r.precision ? `<span class="sb-meta-pill sb-pill-green">${(r.precision*100).toFixed(0)}% precision</span>` : ""}
+        </div>
+        <div class="sb-preview-conds">${condList}</div>
+        <div class="sb-gen-actions">
+          <button class="sb-btn-primary" onclick="window._sbAcceptGenerated()">Save to My Strategies</button>
+          <button class="sb-btn-secondary" onclick="window._sbLoadIntoForm()">Edit before saving</button>
+          <button class="sb-btn-ghost" onclick="state.autogen.result=null;renderBody()">Discard</button>
+        </div>
+      </div>`;
+    }
+
+    var cooldownNote = ag.cooldownRemaining > 0
+      ? `<div class="sb-cooldown">⏱ AI cooldown: ${ag.cooldownRemaining}s (prevents rate limits on main analyst)</div>`
+      : "";
+    var aiErrorNote = ag.aiError
+      ? `<div class="sb-ai-error">⚠ ${escHtml(ag.aiError)}</div>`
+      : "";
+
+    return `
+      <div class="sb-autogen-card">
+        <h3>🔍 Learn from Signals</h3>
+        <p>Scans your past strong signals (score &gt; 35) and finds which condition combos fired most consistently before correct-direction moves. No API calls — instant, always works.</p>
+        <button class="sb-btn-primary" onclick="window._sbAutoGen('signals')"
+          ${ag.generating ? "disabled" : ""}>
+          ${ag.generating && ag.mode==="signals" ? '<span class="sb-spin">⟳</span> Analysing…' : '⟳ Generate from Signal History'}
+        </button>
+      </div>
+
+      <div class="sb-autogen-card">
+        <h3>🤖 Generate with AI</h3>
+        <p>Sends the last 12 candles + engine breakdown to Groq (llama-3.1-8b). AI writes a custom strategy based on the current market pattern. Uses a separate 90-second cooldown so it never starves the main AI analyst.</p>
+        <button class="sb-btn-secondary" onclick="window._sbAutoGen('ai')"
+          ${ag.generating || ag.cooldownRemaining > 0 ? "disabled" : ""}>
+          ${ag.generating && ag.mode==="ai" ? '<span class="sb-spin">⟳</span> Asking AI…' : '🤖 Generate with AI'}
+        </button>
+        ${cooldownNote}
+        ${aiErrorNote}
+      </div>
+
+      ${previewHtml}
+    `;
+  }
+
   function renderListTab() {
     if (state.loading) return `<div class="sb-empty">Loading…</div>`;
     if (!state.strategies.length) {
@@ -561,6 +667,7 @@
       t.classList.toggle("active", t.dataset.tab === activeTab);
     });
 
+    if (activeTab === "autogen") body.innerHTML = renderAutogenTab();
     if (activeTab === "list")   body.innerHTML = renderListTab();
     if (activeTab === "create") body.innerHTML = renderStrategyForm();
     if (activeTab === "config") body.innerHTML = renderConfigTab();
@@ -585,6 +692,14 @@
   }
 
   /* ── panel open/close ───────────────────────────────────────────────────── */
+  // Cooldown ticker — updates every second when autogen tab is open
+  setInterval(function () {
+    if (activeTab === "autogen" && state.autogen.cooldownRemaining > 0) {
+      state.autogen.cooldownRemaining = Math.max(0, state.autogen.cooldownRemaining - 1);
+      renderBody();
+    }
+  }, 1000);
+
   function openPanel() {
     panel.classList.add("open");
     loadStrategies();
@@ -772,4 +887,63 @@
       loadBuiltinConfig();
     });
   };
+  /* ── auto-generate callbacks ─────────────────────────────────────────────── */
+  window._sbAutoGen = function (mode) {
+    state.autogen.generating = true;
+    state.autogen.mode       = mode;
+    state.autogen.aiError    = null;
+    renderBody();
+
+    req("POST", "/api/strategy-builder/auto-generate", {
+      mode:     mode,
+      symbol:   getSymbol(),
+      interval: getInterval(),
+    }).then(function (data) {
+      state.autogen.generating = false;
+      if (data.error && !data.strategy) {
+        state.autogen.aiError = data.error;
+        state.autogen.result  = null;
+      } else {
+        state.autogen.result  = data.strategy;
+        state.autogen.aiError = data.ai_error || null;
+        state.autogen.cooldownRemaining = data.cooldown_remaining || 0;
+      }
+      renderBody();
+    }).catch(function (err) {
+      state.autogen.generating = false;
+      state.autogen.aiError    = "Request failed — check server logs.";
+      renderBody();
+    });
+  };
+
+  window._sbAcceptGenerated = function () {
+    var s = state.autogen.result;
+    if (!s) return;
+    req("POST", "/api/strategy-builder/strategies", s).then(function () {
+      toast("Strategy saved to My Strategies!");
+      state.autogen.result = null;
+      loadStrategies();
+      activeTab = "list";
+      renderBody();
+    }).catch(function () { toast("Error saving strategy"); });
+  };
+
+  window._sbLoadIntoForm = function () {
+    var s = state.autogen.result;
+    if (!s) return;
+    state.form = {
+      name:             s.name || "",
+      description:      s.description || "",
+      weight:           s.weight || 10,
+      signal_direction: s.signal_direction || "bullish",
+      logic:            s.logic || "AND",
+      conditions:       JSON.parse(JSON.stringify(s.conditions || [])),
+    };
+    state.autogen.result = null;
+    state.editing        = null;
+    state.testResult     = null;
+    activeTab = "create";
+    renderBody();
+  };
+
 })();

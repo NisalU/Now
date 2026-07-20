@@ -568,6 +568,74 @@ async def on_cleanup(app: web.Application) -> None:
 # Strategy Builder — REST API
 # ---------------------------------------------------------------------------
 
+
+async def api_strategy_builder_autogenerate(request: web.Request) -> web.Response:
+    """POST /api/strategy-builder/auto-generate
+    
+    Body: { mode: "ai"|"signals", symbol?, interval? }
+    
+    mode=signals  → rule learner (no API, instant, always works)
+    mode=ai       → Groq llama-3.1-8b-instant (90s cooldown, may hit rate limit)
+    
+    Returns: { strategy: {...}, source: "rule_learner"|"ai_generated", cooldown_remaining: N }
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    mode     = body.get("mode", "signals")
+    symbol   = body.get("symbol",   config.DEFAULT_SYMBOL)
+    interval = body.get("interval", config.DEFAULT_INTERVAL)
+
+    if symbol not in config.SYMBOLS:
+        symbol = config.DEFAULT_SYMBOL
+    if interval not in config.INTERVALS:
+        interval = config.DEFAULT_INTERVAL
+
+    from strategy_generator import (
+        generate_from_signals, generate_from_ai, seconds_until_ready, GEN_COOLDOWN
+    )
+
+    try:
+        import data_feed
+        candles = data_feed.get_klines(symbol, interval)
+    except Exception as exc:
+        return web.json_response({"error": f"Failed to fetch candles: {exc}"}, status=500)
+
+    if mode == "ai":
+        try:
+            breakdown = engine.get_state(symbol, interval).get("breakdown", [])
+            strategy  = generate_from_ai(candles, symbol=symbol, engine_breakdown=breakdown)
+            return web.json_response({
+                "strategy":          strategy,
+                "source":            "ai_generated",
+                "cooldown_remaining": int(seconds_until_ready()),
+            })
+        except RuntimeError as exc:
+            # Rate limit or cooldown — fall back to rule learner and surface the message
+            try:
+                strategy = generate_from_signals(candles)
+            except Exception:
+                strategy = None
+            return web.json_response({
+                "strategy":          strategy,
+                "source":            "rule_learner_fallback",
+                "ai_error":          str(exc),
+                "cooldown_remaining": int(GEN_COOLDOWN),
+            }, status=200)   # 200 so UI can show the fallback + error message
+    else:
+        # mode == "signals" — rule learner, always available
+        try:
+            strategy = generate_from_signals(candles)
+            return web.json_response({
+                "strategy":          strategy,
+                "source":            strategy.get("source", "rule_learner"),
+                "cooldown_remaining": int(seconds_until_ready()),
+            })
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=500)
+
 async def api_strategy_builder_list(_request: web.Request) -> web.Response:
     """GET /api/strategy-builder/strategies — list all custom strategies."""
     from strategy_store import list_strategies
@@ -726,6 +794,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/scanner",            api_scanner)
     app.router.add_post("/api/scanner/scan",       api_scanner_scan)
     # Strategy Builder
+    app.router.add_post("/api/strategy-builder/auto-generate",         api_strategy_builder_autogenerate)
     app.router.add_get( "/api/strategy-builder/strategies",        api_strategy_builder_list)
     app.router.add_post("/api/strategy-builder/strategies",        api_strategy_builder_create)
     app.router.add_put( "/api/strategy-builder/strategies/{id}",   api_strategy_builder_update)
