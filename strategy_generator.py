@@ -1,46 +1,33 @@
-"""Automated strategy generation — two independent modes.
+"""Strategy generation using live market data — no AI, no external APIs.
 
-Mode 1 — Rule Learner (no API, always available):
-    Scans engine breakdown history for condition combos that fired during
-    strong signals. Ranks combos by precision (% of fires where price moved
-    the right way). Returns the best combo as a strategy definition.
+Two modes available:
+  generate_from_market_data(candles) — deep analysis of live candles:
+      Evaluates every condition in the catalogue against the current candle
+      window, scores them by consistency over the last N bars, and builds the
+      best-matching strategy definition.
 
-Mode 2 — AI Generator (Groq, optional):
-    Sends a condensed market snapshot to a lightweight Groq model and asks
-    it to write a strategy definition JSON. Uses llama-3.1-8b-instant (low
-    token cost) and enforces a 90-second cooldown so it never starves the
-    main analyst's Groq quota.
+  generate_from_signals(candles) — learn from past strong engine signals:
+      Walks back through signals.json, finds which conditions fired before
+      correct-direction moves, ranks by precision, and returns the best combo.
+
+Both functions return a strategy dict compatible with strategy_store and the
+custom evaluator (strategies/custom.py).
 """
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 import threading
-import traceback
-import random
 from typing import Optional
 
-import requests
 
-# ── shared constants ─────────────────────────────────────────────────────────
-GROQ_URL    = "https://api.groq.com/openai/v1/chat/completions"
-GEN_MODEL   = "llama-3.1-8b-instant"   # cheapest model — keeps TPM low
-GEN_COOLDOWN = 90                        # seconds between AI gen calls
-MAX_TOKENS   = 500
-
-_last_gen_time = 0.0
-_gen_lock      = threading.Lock()
-
-
-def _groq_key() -> str:
-    return os.environ.get("GROQ_API_KEY", "").strip()
-
-
+# ── keep a no-op seconds_until_ready so server.py import doesn't break ───────
 def seconds_until_ready() -> float:
-    """How many seconds until the AI generator cooldown expires."""
-    elapsed = time.time() - _last_gen_time
-    return max(0.0, GEN_COOLDOWN - elapsed)
+    return 0.0
+
+GEN_COOLDOWN = 0  # no AI cooldown
 
 
 # ── condition catalogue (must match strategies/custom.py) ────────────────────
@@ -93,32 +80,266 @@ COND_LABELS = {
     "atr_expansion":      "ATR expansion ×{multiplier}",
     "cvd_rising":         "CVD rising ({n_candles}c)",
     "cvd_falling":        "CVD falling ({n_candles}c)",
-    "near_support":       "Near support (×{atr_mult} ATR)",
-    "near_resistance":    "Near resistance (×{atr_mult} ATR)",
+    "near_support":       "Price near support (≤{atr_mult}×ATR)",
+    "near_resistance":    "Price near resistance (≤{atr_mult}×ATR)",
 }
 
 
 def _make_label(cond: dict) -> str:
-    tmpl = COND_LABELS.get(cond["type"], cond["type"])
+    t   = cond.get("type", "")
+    p   = cond.get("params", {})
+    tpl = COND_LABELS.get(t, t)
     try:
-        return tmpl.format(**cond.get("params", {}))
-    except KeyError:
-        return cond["type"]
+        return tpl.format(**p)
+    except (KeyError, ValueError):
+        return t
 
 
-# ── Mode 1: Rule Learner ──────────────────────────────────────────────────────
+# ── lightweight indicator helpers ─────────────────────────────────────────────
 
-def generate_from_signals(candles: list[dict], signals_path: str | None = None) -> dict:
-    """Discover effective condition combos from past strong signals.
+def _ema(closes: list[float], period: int) -> list[float]:
+    if not closes or period < 1:
+        return []
+    k = 2.0 / (period + 1)
+    out = [closes[0]]
+    for v in closes[1:]:
+        out.append(v * k + out[-1] * (1 - k))
+    return out
+
+
+def _rsi(closes: list[float], period: int = 14) -> float | None:
+    if len(closes) < period + 1:
+        return None
+    gains, losses = [], []
+    for i in range(1, len(closes)):
+        d = closes[i] - closes[i - 1]
+        gains.append(max(d, 0.0))
+        losses.append(max(-d, 0.0))
+    ag = sum(gains[-period:]) / period
+    al = sum(losses[-period:]) / period
+    if al == 0:
+        return 100.0
+    return 100.0 - 100.0 / (1 + ag / al)
+
+
+def _atr(candles: list[dict], period: int = 14) -> float:
+    trs = []
+    for i in range(1, len(candles)):
+        c, p = candles[i], candles[i - 1]
+        trs.append(max(
+            c["high"] - c["low"],
+            abs(c["high"] - p["close"]),
+            abs(c["low"]  - p["close"]),
+        ))
+    if not trs:
+        return candles[-1]["close"] * 0.005
+    recent = trs[-period:] if len(trs) >= period else trs
+    return sum(recent) / len(recent)
+
+
+def _cvd(candles: list[dict], n: int) -> float:
+    """Cumulative volume delta over last n candles."""
+    return sum(c.get("delta", 0.0) for c in candles[-n:])
+
+
+def _market_snapshot(candles: list[dict]) -> dict:
+    """Compute a compact market snapshot for the description string."""
+    closes  = [c["close"] for c in candles]
+    price   = closes[-1]
+    ema7    = _ema(closes, 7)[-1]  if len(closes) >= 7  else price
+    ema25   = _ema(closes, 25)[-1] if len(closes) >= 25 else price
+    ema99   = _ema(closes, 99)[-1] if len(closes) >= 99 else price
+    rsi     = _rsi(closes, 14)
+    atr_val = _atr(candles, 14)
+    cvd5    = _cvd(candles, 5)
+    vol_avg = sum(c["volume"] for c in candles[-20:]) / 20 if len(candles) >= 20 else 0
+    vol_now = candles[-1]["volume"]
+    vol_ratio = vol_now / vol_avg if vol_avg else 1.0
+    chg5  = (price / closes[-6] - 1) * 100 if len(closes) >= 6 else 0.0
+    chg20 = (price / closes[-21] - 1) * 100 if len(closes) >= 21 else 0.0
+    return {
+        "price": price, "ema7": ema7, "ema25": ema25, "ema99": ema99,
+        "rsi": rsi, "atr": atr_val, "cvd5": cvd5,
+        "vol_ratio": vol_ratio, "chg5": chg5, "chg20": chg20,
+        "above_ema25": price > ema25, "above_ema99": price > ema99,
+        "ema7_above_ema25": ema7 > ema25,
+    }
+
+
+# ── rolling window evaluator ──────────────────────────────────────────────────
+
+def _rolling_fire_rate(cond: dict, candles: list[dict], window: int = 30) -> float:
+    """Fraction of the last `window` candles where this condition fires.
+
+    For each step i we look at candles[:i+1] (the full history up to that bar)
+    so the condition sees realistic data.
+    """
+    from strategies.custom import _eval_condition  # local import
+    n     = len(candles)
+    start = max(20, n - window)
+    fires = 0
+    total = 0
+    for i in range(start, n):
+        window_data = candles[:i + 1]
+        try:
+            if _eval_condition(cond, window_data):
+                fires += 1
+        except Exception:
+            pass
+        total += 1
+    return fires / total if total else 0.0
+
+
+def _forward_return(candles: list[dict], idx: int, horizon: int = 3) -> float:
+    """Percentage price change from candle[idx] to candle[idx+horizon]."""
+    end = min(idx + horizon, len(candles) - 1)
+    if end <= idx:
+        return 0.0
+    return (candles[end]["close"] / candles[idx]["close"] - 1) * 100
+
+
+# ── main: generate from market data ──────────────────────────────────────────
+
+def generate_from_market_data(candles: list[dict]) -> dict:
+    """Analyse live candle data and return the best strategy definition.
 
     Algorithm:
+    1.  Compute a market snapshot (trend, momentum, volume, CVD).
+    2.  Determine bias: bullish / bearish based on EMA stack, RSI, CVD.
+    3.  For each candidate condition aligned with that bias, measure:
+         a. Rolling fire rate over last 30 bars
+         b. Precision: fire rate on bars where forward return confirmed direction
+    4.  Pick top 2–3 conditions by precision × fire-rate score.
+    5.  Return strategy dict.
+    """
+    from strategies.custom import _eval_condition  # local import
+
+    if len(candles) < 30:
+        return _minimal_fallback(candles)
+
+    snap = _market_snapshot(candles)
+
+    # Determine bias from multiple signals
+    bull_votes = 0
+    bear_votes = 0
+    if snap["above_ema25"]:        bull_votes += 1
+    else:                          bear_votes += 1
+    if snap["above_ema99"]:        bull_votes += 1
+    else:                          bear_votes += 1
+    if snap["ema7_above_ema25"]:   bull_votes += 1
+    else:                          bear_votes += 1
+    if snap["rsi"] is not None:
+        if snap["rsi"] > 52:       bull_votes += 1
+        elif snap["rsi"] < 48:     bear_votes += 1
+    if snap["cvd5"] > 0:           bull_votes += 1
+    elif snap["cvd5"] < 0:         bear_votes += 1
+    if snap["chg5"] > 0.5:         bull_votes += 1
+    elif snap["chg5"] < -0.5:      bear_votes += 1
+
+    is_bullish  = bull_votes >= bear_votes
+    direction   = "bullish" if is_bullish else "bearish"
+    pool        = BULLISH_CONDS if is_bullish else BEARISH_CONDS
+
+    # Score each condition in the aligned pool
+    scored: list[tuple[str, float, float]] = []  # (type, precision, fire_rate)
+    horizon = 3
+
+    for cat_cond in CONDITION_CATALOGUE:
+        ct = cat_cond["type"]
+        if ct not in pool:
+            continue
+        # Fire points: indices where condition fired on candles[:i+1]
+        fire_indices = []
+        n = len(candles)
+        for i in range(20, n - horizon):
+            try:
+                if _eval_condition(cat_cond, candles[:i + 1]):
+                    fire_indices.append(i)
+            except Exception:
+                pass
+
+        if len(fire_indices) < 3:
+            continue
+
+        fire_rate = len(fire_indices) / max(1, n - 20 - horizon)
+
+        # Precision: fraction of fires where forward return confirmed direction
+        confirmed = 0
+        for idx in fire_indices:
+            fwd = _forward_return(candles, idx, horizon)
+            if is_bullish and fwd > 0.1:
+                confirmed += 1
+            elif not is_bullish and fwd < -0.1:
+                confirmed += 1
+        precision = confirmed / len(fire_indices)
+
+        # Combined score: reward precision, penalise conditions that never fire
+        combo_score = precision * min(1.0, fire_rate * 5)
+        scored.append((ct, precision, fire_rate, combo_score))
+
+    if not scored:
+        return _minimal_fallback(candles)
+
+    scored.sort(key=lambda x: -x[3])
+    top = scored[:3]
+
+    # Build condition objects
+    conditions = []
+    for ct, prec, fr, _ in top:
+        tmpl = next((c for c in CONDITION_CATALOGUE if c["type"] == ct), None)
+        if tmpl:
+            cond = dict(tmpl)
+            cond["label"] = _make_label(cond)
+            conditions.append(cond)
+
+    if not conditions:
+        return _minimal_fallback(candles)
+
+    rsi_str  = f"RSI {snap['rsi']:.0f}" if snap["rsi"] is not None else "RSI n/a"
+    cvd_str  = f"CVD {'↑' if snap['cvd5'] > 0 else '↓'}{abs(snap['cvd5']):.0f}"
+    chg_str  = f"5c chg {snap['chg5']:+.2f}%"
+    vol_str  = f"vol ×{snap['vol_ratio']:.1f}"
+    prec_pct = top[0][1] * 100
+
+    desc = (
+        f"Market-data strategy for {'bullish' if is_bullish else 'bearish'} bias. "
+        f"Snapshot: {rsi_str}, {cvd_str}, {chg_str}, {vol_str}. "
+        f"Top condition precision: {prec_pct:.0f}% over {len(candles)} candles."
+    )
+
+    logic = "AND" if len(conditions) >= 2 else "OR"
+    name  = f"MktData — {'Bull' if is_bullish else 'Bear'} ({len(conditions)}c {logic})"
+
+    return {
+        "name":             name,
+        "description":      desc,
+        "signal_direction": direction,
+        "logic":            logic,
+        "weight":           10,
+        "conditions":       conditions,
+        "source":           "market_data",
+        "precision":        round(top[0][1], 3),
+        "market_snapshot":  {
+            "rsi":       round(snap["rsi"], 1) if snap["rsi"] is not None else None,
+            "cvd5":      round(snap["cvd5"], 2),
+            "chg5":      round(snap["chg5"], 3),
+            "vol_ratio": round(snap["vol_ratio"], 2),
+            "bias_votes": {"bull": bull_votes, "bear": bear_votes},
+        },
+    }
+
+
+# ── generate from historical signals ─────────────────────────────────────────
+
+def generate_from_signals(candles: list[dict],
+                          signals_path: str | None = None) -> dict:
+    """Discover effective condition combos from past strong engine signals.
+
     1. Load signals.json for recent LONG/SHORT signals with score > 35.
-    2. For each signal, walk back through candles to the signal timestamp,
-       evaluate every condition in CONDITION_CATALOGUE.
-    3. Count how many times each condition fired BEFORE a correct-direction
-       signal vs a wrong-direction one.
-    4. Pick the top 2–3 conditions with the highest precision for the dominant
-       direction and bundle them into a strategy definition.
+    2. For each signal, walk back through candles to the signal timestamp and
+       evaluate every catalogue condition.
+    3. Rank conditions by precision (fires on correct-direction bars).
+    4. Return best combo, or fall back to generate_from_market_data().
     """
     if signals_path is None:
         signals_path = os.path.join(os.path.dirname(__file__), "signals.json")
@@ -129,23 +350,22 @@ def generate_from_signals(candles: list[dict], signals_path: str | None = None) 
     except Exception:
         raw_signals = []
 
-    # Strong signals only
     strong = [s for s in raw_signals
               if abs(s.get("score", 0)) >= 35 and s.get("direction") in ("LONG", "SHORT")]
 
     if not strong:
-        return _fallback_from_candles(candles)
+        # No history yet — fall back to live-candle analysis
+        return generate_from_market_data(candles)
 
-    from strategies.custom import _eval_condition  # local import avoids circular
+    from strategies.custom import _eval_condition
 
-    # Score each condition: count fires on strong-signal candles
-    cond_scores: dict[str, dict] = {}  # type -> {"bull": int, "bear": int, "total": int}
+    cond_scores: dict[str, dict] = {}
 
-    for sig in strong[-30:]:           # last 30 strong signals
-        direction = sig["direction"]
-        sig_time  = sig.get("time", 0)
+    for sig in strong[-30:]:
+        sig_dir  = sig["direction"]
+        sig_time = sig.get("time", 0)
 
-        # Find the candle closest to this signal
+        # Find the candle index closest to signal timestamp
         closest_idx = len(candles) - 1
         for i, c in enumerate(candles):
             if c.get("time", 0) >= sig_time:
@@ -167,17 +387,17 @@ def generate_from_signals(candles: list[dict], signals_path: str | None = None) 
                 cond_scores[ct] = {"bull": 0, "bear": 0, "total": 0}
             cond_scores[ct]["total"] += 1
             if fired:
-                if direction == "LONG":
+                if sig_dir == "LONG":
                     cond_scores[ct]["bull"] += 1
                 else:
                     cond_scores[ct]["bear"] += 1
 
     if not cond_scores:
-        return _fallback_from_candles(candles)
+        return generate_from_market_data(candles)
 
-    # Compute per-condition precision toward each direction
-    bull_scored = []
-    bear_scored = []
+    bull_scored: list[tuple[str, float]] = []
+    bear_scored: list[tuple[str, float]] = []
+
     for ct, sc in cond_scores.items():
         if sc["total"] < 3:
             continue
@@ -191,37 +411,38 @@ def generate_from_signals(candles: list[dict], signals_path: str | None = None) 
     bull_scored.sort(key=lambda x: -x[1])
     bear_scored.sort(key=lambda x: -x[1])
 
-    # Pick the stronger direction
-    top_bull_prec = bull_scored[0][1] if bull_scored else 0
-    top_bear_prec = bear_scored[0][1] if bear_scored else 0
+    top_bull = bull_scored[0][1] if bull_scored else 0.0
+    top_bear = bear_scored[0][1] if bear_scored else 0.0
 
-    if top_bull_prec >= top_bear_prec and bull_scored:
+    if top_bull >= top_bear and bull_scored:
         direction     = "bullish"
         top_conds_raw = bull_scored[:3]
     elif bear_scored:
         direction     = "bearish"
         top_conds_raw = bear_scored[:3]
     else:
-        return _fallback_from_candles(candles)
+        return generate_from_market_data(candles)
 
-    # Build condition objects
     conditions = []
     for ct, prec in top_conds_raw:
-        template = next((c for c in CONDITION_CATALOGUE if c["type"] == ct), None)
-        if template:
-            cond = dict(template)
+        tmpl = next((c for c in CONDITION_CATALOGUE if c["type"] == ct), None)
+        if tmpl:
+            cond = dict(tmpl)
             cond["label"] = _make_label(cond)
             conditions.append(cond)
 
     if not conditions:
-        return _fallback_from_candles(candles)
+        return generate_from_market_data(candles)
 
     top_prec = top_conds_raw[0][1]
-    desc = (f"Auto-discovered: {len(conditions)} conditions with {top_prec*100:.0f}% "
-            f"precision on past {len(strong)} strong signals.")
+    desc = (
+        f"Learnt from {len(strong)} strong signals (score ≥ 35). "
+        f"Top condition precision: {top_prec*100:.0f}%. "
+        f"{len(conditions)} conditions, {('AND' if len(conditions) >= 2 else 'OR')} logic."
+    )
 
     return {
-        "name":             f"Auto — {'Bull' if direction == 'bullish' else 'Bear'} Pattern",
+        "name":             f"Signal-Learner — {'Bull' if direction == 'bullish' else 'Bear'} ({len(strong)} signals)",
         "description":      desc,
         "signal_direction": direction,
         "logic":            "AND" if len(conditions) >= 2 else "OR",
@@ -232,23 +453,17 @@ def generate_from_signals(candles: list[dict], signals_path: str | None = None) 
     }
 
 
-def _fallback_from_candles(candles: list[dict]) -> dict:
-    """Minimal fallback when no signal history is available.
-
-    Looks at the last 20 candles: if cumulative delta is positive and price
-    is above EMA25, generate a bullish strategy; otherwise bearish.
-    """
-    closes = [c["close"] for c in candles]
-    cum_d  = sum(c.get("delta", 0) for c in candles[-20:])
-
-    # Simple EMA25
-    k   = 2 / 26
-    ema = closes[0]
+def _minimal_fallback(candles: list[dict]) -> dict:
+    """Absolute fallback when data is too sparse for scoring."""
+    closes  = [c["close"] for c in candles]
+    cum_d   = sum(c.get("delta", 0.0) for c in candles[-20:])
+    k       = 2.0 / 26
+    ema     = closes[0]
     for p in closes[1:]:
         ema = p * k + ema * (1 - k)
-    price_above_ema = closes[-1] > ema
+    is_bull = closes[-1] > ema and cum_d >= 0
 
-    if cum_d > 0 and price_above_ema:
+    if is_bull:
         direction  = "bullish"
         conditions = [
             {"type": "price_above_ema", "params": {"period": 25},
@@ -266,165 +481,20 @@ def _fallback_from_candles(candles: list[dict]) -> dict:
         ]
 
     return {
-        "name":             f"Auto — {'Bull' if direction == 'bullish' else 'Bear'} Base",
-        "description":      "Auto-generated from current market snapshot (no signal history yet).",
+        "name":             f"Snapshot — {'Bull' if is_bull else 'Bear'} Base",
+        "description":      "Generated from current market snapshot (insufficient history for scoring).",
         "signal_direction": direction,
         "logic":            "AND",
         "weight":           8,
         "conditions":       conditions,
-        "source":           "candle_snapshot",
+        "source":           "market_data",
+        "precision":        None,
     }
 
 
-# ── Mode 2: AI Generator (Groq) ───────────────────────────────────────────────
-
-_SYSTEM_PROMPT = """You are a quant analyst designing rules-based crypto trading strategies.
-
-Given live market data, output ONE strategy as JSON.
-
-Available condition types and their params:
-- price_above_ema      {"period": 7|25|99}
-- price_below_ema      {"period": 7|25|99}
-- ema_cross_above      {"fast": 7|25, "slow": 25|99}
-- ema_cross_below      {"fast": 7|25, "slow": 25|99}
-- rsi_above            {"threshold": 30-70, "period": 14}
-- rsi_below            {"threshold": 30-70, "period": 14}
-- volume_spike         {"multiplier": 1.2-3.0}
-- candle_bullish       {"body_pct": 0.3-0.8}
-- candle_bearish       {"body_pct": 0.3-0.8}
-- delta_positive       {"n_candles": 1-10}
-- delta_negative       {"n_candles": 1-10}
-- price_change_above   {"pct": 0.5-5.0, "n_candles": 3-20}
-- price_change_below   {"pct": 0.5-5.0, "n_candles": 3-20}
-- atr_expansion        {"multiplier": 1.1-3.0}
-- cvd_rising           {"n_candles": 3-10}
-- cvd_falling          {"n_candles": 3-10}
-- near_support         {"atr_mult": 0.3-1.5}
-- near_resistance      {"atr_mult": 0.3-1.5}
-
-Return ONLY this JSON (no markdown, no explanation):
-{
-  "name": "short strategy name",
-  "description": "one sentence: what market condition this targets",
-  "signal_direction": "bullish" or "bearish",
-  "logic": "AND" or "OR",
-  "weight": 6-14,
-  "conditions": [
-    {"type": "<type>", "label": "<human label>", "params": {<params>}},
-    ...
-  ]
-}
-Use 2-4 conditions. Make them internally consistent (all bullish OR all bearish conditions unless mixing for confirmation)."""
-
+# ── stub kept for server.py import compatibility ──────────────────────────────
 
 def generate_from_ai(candles: list[dict], symbol: str = "?",
-                     engine_breakdown: list[dict] | None = None) -> dict:
-    """Use Groq llama-3.1-8b to auto-generate a strategy from market context.
-
-    Returns a strategy definition dict on success.
-    Raises RuntimeError if Groq key missing, cooldown active, or rate limited.
-    """
-    global _last_gen_time
-
-    key = _groq_key()
-    if not key:
-        raise RuntimeError("GROQ_API_KEY not set — AI generation unavailable.")
-
-    with _gen_lock:
-        wait = seconds_until_ready()
-        if wait > 0:
-            raise RuntimeError(
-                f"AI generator cooldown: {int(wait)}s remaining. "
-                "Use 'Learn from Signals' for instant generation."
-            )
-
-    # Build compact market snapshot
-    recent = candles[-12:]
-    candle_lines = []
-    for c in recent:
-        d  = c.get("delta", 0)
-        cl = c["close"]
-        ch = c["high"]
-        lo = c["low"]
-        pct = (cl / candles[-13]["close"] - 1) * 100 if len(candles) > 13 else 0
-        candle_lines.append(
-            f"  close={cl:.4g} hi={ch:.4g} lo={lo:.4g} delta={d:+.0f} chg={pct:+.2f}%"
-        )
-
-    top_strategies = ""
-    if engine_breakdown:
-        top3 = sorted(engine_breakdown, key=lambda b: -abs(b.get("contribution", 0)))[:5]
-        top_strategies = "\nTop engine signals:\n" + "\n".join(
-            f"  {b['label']}: score={b['score']:+.2f} contribution={b['contribution']:+.1f}"
-            for b in top3
-        )
-
-    user_text = (
-        f"Symbol: {symbol}\n"
-        f"Last {len(recent)} candles:\n" + "\n".join(candle_lines) +
-        top_strategies +
-        "\n\nDesign a strategy that targets the dominant pattern in this data."
-    )
-
-    body = {
-        "model":       GEN_MODEL,
-        "max_tokens":  MAX_TOKENS,
-        "temperature": 0.4,
-        "messages": [
-            {"role": "system",  "content": _SYSTEM_PROMPT},
-            {"role": "user",    "content": user_text},
-        ],
-    }
-
-    try:
-        resp = requests.post(
-            GROQ_URL,
-            json=body,
-            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-            timeout=25,
-        )
-    except requests.RequestException as exc:
-        raise RuntimeError(f"Groq request failed: {exc}") from exc
-
-    with _gen_lock:
-        _last_gen_time = time.time()
-
-    if resp.status_code == 429:
-        raise RuntimeError(
-            "Groq rate limit hit. Use 'Learn from Signals' instead, "
-            f"or wait {GEN_COOLDOWN}s and try again."
-        )
-    if resp.status_code != 200:
-        raise RuntimeError(f"Groq error {resp.status_code}: {resp.text[:200]}")
-
-    raw = resp.json()["choices"][0]["message"]["content"].strip()
-
-    # Strip markdown fences if present
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    raw = raw.strip()
-
-    try:
-        strategy = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"AI returned invalid JSON: {raw[:200]}") from exc
-
-    # Validate required fields
-    required = ("name", "signal_direction", "conditions")
-    missing  = [k for k in required if k not in strategy]
-    if missing:
-        raise RuntimeError(f"AI strategy missing fields: {missing}")
-
-    # Enforce safe weight
-    strategy["weight"]  = max(6, min(14, int(strategy.get("weight", 10))))
-    strategy["logic"]   = strategy.get("logic", "AND").upper()
-    strategy["source"]  = "ai_generated"
-
-    # Ensure each condition has a label
-    for cond in strategy.get("conditions", []):
-        if "label" not in cond:
-            cond["label"] = _make_label(cond)
-
-    return strategy
+                     engine_breakdown: list | None = None) -> dict:
+    """AI generation is disabled — returns market-data strategy instead."""
+    return generate_from_market_data(candles)

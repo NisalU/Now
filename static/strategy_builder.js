@@ -41,10 +41,8 @@
     editing:     null,
     autogen: {
       generating: false,
-      mode: "signals",       // "signals" | "ai"
-      result: null,          // last generated strategy
-      aiError: null,
-      cooldownRemaining: 0,
+      mode: "market",        // "market" | "signals"
+      result: null,
     },
     form: {
       name: "", description: "", weight: 8,
@@ -542,7 +540,7 @@
       var r = ag.result;
       var dirClass = r.signal_direction === "bullish" ? "sb-pill-green" : "sb-pill-red";
       var dirLabel = r.signal_direction === "bullish" ? "LONG" : "SHORT";
-      var sourceLabel = r.source === "ai_generated" ? "AI Generated" :
+      var sourceLabel = r.source === "market_data"  ? "Market Data" :
                         r.source === "rule_learner"  ? "Signal Learner" : "Auto";
       var condList = (r.conditions || []).map(function (c) {
         return `<div class="sb-preview-cond"><div class="sb-preview-cond-dot"></div>${escHtml(c.label||c.type)}</div>`;
@@ -568,35 +566,44 @@
       </div>`;
     }
 
-    var cooldownNote = ag.cooldownRemaining > 0
-      ? `<div class="sb-cooldown">⏱ AI cooldown: ${ag.cooldownRemaining}s (prevents rate limits on main analyst)</div>`
-      : "";
-    var aiErrorNote = ag.aiError
-      ? `<div class="sb-ai-error">⚠ ${escHtml(ag.aiError)}</div>`
-      : "";
+    var snapshotHtml = "";
+    if (ag.result && ag.result.market_snapshot) {
+      var ms = ag.result.market_snapshot;
+      var rsiStr = ms.rsi != null ? "RSI " + ms.rsi.toFixed(1) : "RSI —";
+      var cvdStr = ms.cvd5 != null ? "CVD " + (ms.cvd5 >= 0 ? "+" : "") + parseFloat(ms.cvd5).toFixed(0) : "";
+      var chgStr = ms.chg5 != null ? "5c " + (ms.chg5 >= 0 ? "+" : "") + parseFloat(ms.chg5).toFixed(2) + "%" : "";
+      var volStr = ms.vol_ratio != null ? "Vol ×" + parseFloat(ms.vol_ratio).toFixed(1) : "";
+      var votes  = ms.bias_votes || {};
+      snapshotHtml = `<div style="margin-top:10px;padding:8px 12px;background:#0b0f14;border:1px solid #1e2437;border-radius:6px;font-size:11px;color:#6b7280;display:flex;gap:16px;flex-wrap:wrap;">
+        <span>📊 <b style="color:#a5b4fc">${escHtml(rsiStr)}</b></span>
+        <span><b style="color:#4ade80">${escHtml(cvdStr)}</b></span>
+        <span><b style="color:#e8eaf0">${escHtml(chgStr)}</b></span>
+        <span><b style="color:#f59e0b">${escHtml(volStr)}</b></span>
+        <span style="margin-left:auto;color:#4b5563">Bull ${votes.bull||0} / Bear ${votes.bear||0} votes</span>
+      </div>`;
+    }
 
     return `
       <div class="sb-autogen-card">
-        <h3>🔍 Learn from Signals</h3>
-        <p>Scans your past strong signals (score &gt; 35) and finds which condition combos fired most consistently before correct-direction moves. No API calls — instant, always works.</p>
-        <button class="sb-btn-primary" onclick="window._sbAutoGen('signals')"
+        <h3>📡 Analyse Live Market Data</h3>
+        <p>Analyses 300 Binance candles — RSI, EMA stack, CVD, volume, ATR — to find which conditions have the highest forward-return precision right now. No AI, no API keys needed.</p>
+        <button class="sb-btn-primary" onclick="window._sbAutoGen('market')"
           ${ag.generating ? "disabled" : ""}>
-          ${ag.generating && ag.mode==="signals" ? '<span class="sb-spin">⟳</span> Analysing…' : '⟳ Generate from Signal History'}
+          ${ag.generating && ag.mode==="market" ? '<span class="sb-spin">⟳</span> Analysing market…' : '📡 Analyse Current Market'}
         </button>
       </div>
 
       <div class="sb-autogen-card">
-        <h3>🤖 Generate with AI</h3>
-        <p>Sends the last 12 candles + engine breakdown to Groq (llama-3.1-8b). AI writes a custom strategy based on the current market pattern. Uses a separate 90-second cooldown so it never starves the main AI analyst.</p>
-        <button class="sb-btn-secondary" onclick="window._sbAutoGen('ai')"
-          ${ag.generating || ag.cooldownRemaining > 0 ? "disabled" : ""}>
-          ${ag.generating && ag.mode==="ai" ? '<span class="sb-spin">⟳</span> Asking AI…' : '🤖 Generate with AI'}
+        <h3>🔍 Learn from Signal History</h3>
+        <p>Scans past strong engine signals (score ≥ 35) and finds condition combos that fired most consistently before correct-direction moves. Falls back to live market analysis when no history exists yet.</p>
+        <button class="sb-btn-secondary" onclick="window._sbAutoGen('signals')"
+          ${ag.generating ? "disabled" : ""}>
+          ${ag.generating && ag.mode==="signals" ? '<span class="sb-spin">⟳</span> Scanning signals…' : '🔍 Learn from Signal History'}
         </button>
-        ${cooldownNote}
-        ${aiErrorNote}
       </div>
 
       ${previewHtml}
+      ${snapshotHtml}
     `;
   }
 
@@ -891,7 +898,6 @@
   window._sbAutoGen = function (mode) {
     state.autogen.generating = true;
     state.autogen.mode       = mode;
-    state.autogen.aiError    = null;
     renderBody();
 
     req("POST", "/api/strategy-builder/auto-generate", {

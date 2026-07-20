@@ -122,35 +122,35 @@ class Engine:
             overlays.update(res.get("overlays", {}))
 
         # ── Run user-created custom strategies ──────────────────────────────────
-    try:
-        from strategy_store import list_strategies
-        from strategies.custom import evaluate as _eval_custom
-        for _cs in list_strategies():
-            if not _cs.get("enabled", True):
-                continue
-            _cw = _cs.get("weight", 8)
-            try:
-                _cr = _eval_custom(_cs, candles)
-            except Exception:
-                traceback.print_exc()
-                _cr = {"score": 0, "reasons": ["custom strategy error"], "overlays": {}}
-            _contribution = _cr["score"] * _cw
-            composite += _contribution
-            breakdown.append({
-                "key":          "custom_" + _cs["id"][:8],
-                "label":        _cs["name"],
-                "weight":       _cw,
-                "score":        round(_cr["score"], 3),
-                "contribution": round(_contribution, 2),
-                "reasons":      _cr["reasons"],
-                "custom":       True,
-                "custom_id":    _cs["id"],
-            })
-            overlays.update(_cr.get("overlays", {}))
-    except Exception:
-        traceback.print_exc()
+        try:
+            from strategy_store import list_strategies
+            from strategies.custom import evaluate as _eval_custom
+            for _cs in list_strategies():
+                if not _cs.get("enabled", True):
+                    continue
+                _cw = _cs.get("weight", 8)
+                try:
+                    _cr = _eval_custom(_cs, candles)
+                except Exception:
+                    traceback.print_exc()
+                    _cr = {"score": 0, "reasons": ["custom strategy error"], "overlays": {}}
+                _contribution = _cr["score"] * _cw
+                composite += _contribution
+                breakdown.append({
+                    "key":          "custom_" + _cs["id"][:8],
+                    "label":        _cs["name"],
+                    "weight":       _cw,
+                    "score":        round(_cr["score"], 3),
+                    "contribution": round(_contribution, 2),
+                    "reasons":      _cr["reasons"],
+                    "custom":       True,
+                    "custom_id":    _cs["id"],
+                })
+                overlays.update(_cr.get("overlays", {}))
+        except Exception:
+            traceback.print_exc()
 
-    composite = max(-100.0, min(100.0, composite))
+        composite = max(-100.0, min(100.0, composite))
         direction = "LONG" if composite >= config.SIGNAL_THRESHOLD else \
                     "SHORT" if composite <= -config.SIGNAL_THRESHOLD else "NEUTRAL"
         strength = "STRONG" if abs(composite) >= config.STRONG_THRESHOLD else \

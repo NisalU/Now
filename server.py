@@ -80,7 +80,11 @@ def _load_app_modules() -> None:
     global config, ai_analyst, engine, manager, scanner
 
     import config as _config
-    from ai_analyst import ai_analyst as _ai_analyst
+    try:
+        from ai_analyst import ai_analyst as _ai_analyst
+    except Exception as _exc:
+        print(f"[warn] AI analyst disabled: {_exc}")
+        _ai_analyst = None
     from engine import engine as _engine
     from stream import manager as _manager
     from scanner import scanner as _scanner
@@ -139,7 +143,7 @@ async def api_ai(request: web.Request) -> web.Response:
     symbol = request.query.get("symbol", config.DEFAULT_SYMBOL)
     if symbol not in config.SYMBOLS:
         return web.json_response({"error": "invalid symbol"}, status=400)
-    if not ai_analyst.enabled:
+    if not (ai_analyst and ai_analyst.enabled):
         return web.json_response({"error": "GROQ_API_KEY not set"}, status=503)
     cached = ai_analyst.get_cached(symbol)
     if cached:
@@ -149,10 +153,14 @@ async def api_ai(request: web.Request) -> web.Response:
 
 
 async def api_engine_status(_request: web.Request) -> web.Response:
+    if not (ai_analyst and ai_analyst.enabled):
+        return web.json_response({"enabled": False, "status": "AI analyst not configured"})
     return web.json_response(ai_analyst.get_status())
 
 
 async def api_ai_signals(_request: web.Request) -> web.Response:
+    if not (ai_analyst and ai_analyst.enabled):
+        return web.json_response([])
     return web.json_response(ai_analyst.get_recent_signals())
 
 
@@ -164,6 +172,8 @@ async def api_binance_key_status(_request: web.Request) -> web.Response:
 
 
 async def api_pipeline_events(_request: web.Request) -> web.Response:
+    if not (ai_analyst and ai_analyst.enabled):
+        return web.json_response({"events": [], "active_run": None})
     return web.json_response({
         "events":     ai_analyst.get_pipeline_log(),
         "active_run": ai_analyst.get_active_run(),
@@ -213,6 +223,8 @@ async def api_exchange(request: web.Request) -> web.Response:
 async def api_pending_limits(request: web.Request) -> web.Response:
     """Return pending LIMIT order signals (waiting for price to reach entry)."""
     symbol = request.query.get("symbol")
+    if not (ai_analyst and ai_analyst.enabled):
+        return web.json_response({"pending": []})
     limits = ai_analyst.get_pending_limits(symbol)
     return web.json_response({"pending": limits})
 
@@ -220,6 +232,8 @@ async def api_pending_limits(request: web.Request) -> web.Response:
 async def api_signal_status(request: web.Request) -> web.Response:
     """Active-signal lock status for each symbol."""
     symbol = request.query.get("symbol")
+    if not (ai_analyst and ai_analyst.enabled):
+        return web.json_response({"symbol": symbol, "active_signal": None, "next_analysis": None})
     status = ai_analyst.get_status()
     if symbol:
         return web.json_response({
@@ -269,7 +283,7 @@ async def ws_endpoint(request: web.Request) -> web.WebSocketResponse:
         })
         if config.ENGINE_SIGNAL_FEED:
             client.send({"type": "signals", "data": list(reversed(engine.signals[-50:]))})
-        if ai_analyst.enabled:
+        if ai_analyst and ai_analyst.enabled:
             cached_ai = ai_analyst.get_cached(client.symbol)
             if cached_ai:
                 client.send({"type": "ai", "data": cached_ai})
@@ -318,7 +332,7 @@ async def ws_endpoint(request: web.Request) -> web.WebSocketResponse:
                     manager.retarget(client, sym, ivl)
                     asyncio.create_task(push_snapshot(sym, ivl))
                     # Push cached AI immediately so dashboard updates without wait
-                    if ai_analyst.enabled:
+                    if ai_analyst and ai_analyst.enabled:
                         cached_ai = ai_analyst.get_cached(sym)
                         if cached_ai:
                             client.send({"type": "ai", "data": cached_ai})
@@ -364,6 +378,8 @@ async def ws_endpoint(request: web.Request) -> web.WebSocketResponse:
 
 def _push_countdown(client, symbol):
     """Push next-analysis countdown for `symbol` to a single client."""
+    if not (ai_analyst and ai_analyst.enabled):
+        return
     next_ts = ai_analyst.get_next_analysis_ts(symbol)
     if next_ts:
         client.send({
@@ -381,6 +397,8 @@ async def _quick_ai(symbol: str) -> None:
     so the dashboard shows a signal within seconds rather than waiting up to
     AI_REFRESH_SECONDS for the regular loop to get around to it.
     """
+    if not (ai_analyst and ai_analyst.enabled):
+        return
     try:
         result = await asyncio.to_thread(ai_analyst.analyze_safe, symbol)
         if not result:
@@ -531,7 +549,7 @@ import time as _time_mod  # noqa: E402 (used in _ai_loop)
 
 async def on_startup(app: web.Application) -> None:
     manager.start()
-    if ai_analyst.enabled:
+    if ai_analyst and ai_analyst.enabled:
         app["ai_task"]     = asyncio.create_task(_ai_loop())
         app["status_task"] = asyncio.create_task(_status_loop())
         print(f"[ai] Groq AI analyst enabled — {config.AI_REFRESH_SECONDS}s scalp refresh active")
@@ -603,38 +621,20 @@ async def api_strategy_builder_autogenerate(request: web.Request) -> web.Respons
     except Exception as exc:
         return web.json_response({"error": f"Failed to fetch candles: {exc}"}, status=500)
 
-    if mode == "ai":
-        try:
-            breakdown = engine.get_state(symbol, interval).get("breakdown", [])
-            strategy  = generate_from_ai(candles, symbol=symbol, engine_breakdown=breakdown)
-            return web.json_response({
-                "strategy":          strategy,
-                "source":            "ai_generated",
-                "cooldown_remaining": int(seconds_until_ready()),
-            })
-        except RuntimeError as exc:
-            # Rate limit or cooldown — fall back to rule learner and surface the message
-            try:
-                strategy = generate_from_signals(candles)
-            except Exception:
-                strategy = None
-            return web.json_response({
-                "strategy":          strategy,
-                "source":            "rule_learner_fallback",
-                "ai_error":          str(exc),
-                "cooldown_remaining": int(GEN_COOLDOWN),
-            }, status=200)   # 200 so UI can show the fallback + error message
-    else:
-        # mode == "signals" — rule learner, always available
-        try:
+    # Always use market-data strategy learner — no AI dependency
+    try:
+        from strategy_generator import generate_from_signals, generate_from_market_data
+        if mode == "market":
+            strategy = generate_from_market_data(candles)
+        else:
             strategy = generate_from_signals(candles)
-            return web.json_response({
-                "strategy":          strategy,
-                "source":            strategy.get("source", "rule_learner"),
-                "cooldown_remaining": int(seconds_until_ready()),
-            })
-        except Exception as exc:
-            return web.json_response({"error": str(exc)}, status=500)
+        return web.json_response({
+            "strategy": strategy,
+            "source":   strategy.get("source", "rule_learner"),
+            "cooldown_remaining": 0,
+        })
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=500)
 
 async def api_strategy_builder_list(_request: web.Request) -> web.Response:
     """GET /api/strategy-builder/strategies — list all custom strategies."""
