@@ -563,6 +563,153 @@ async def on_cleanup(app: web.Application) -> None:
     await manager.stop()
 
 
+
+# ---------------------------------------------------------------------------
+# Strategy Builder — REST API
+# ---------------------------------------------------------------------------
+
+async def api_strategy_builder_list(_request: web.Request) -> web.Response:
+    """GET /api/strategy-builder/strategies — list all custom strategies."""
+    from strategy_store import list_strategies
+    return web.json_response({"strategies": list_strategies()})
+
+
+async def api_strategy_builder_create(request: web.Request) -> web.Response:
+    """POST /api/strategy-builder/strategies — create a new custom strategy."""
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    from strategy_store import create_strategy
+    strategy = create_strategy(data)
+    return web.json_response({"strategy": strategy}, status=201)
+
+
+async def api_strategy_builder_update(request: web.Request) -> web.Response:
+    """PUT /api/strategy-builder/strategies/{id} — update a custom strategy."""
+    sid = request.match_info.get("id", "")
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    from strategy_store import update_strategy
+    updated = update_strategy(sid, data)
+    if updated is None:
+        return web.json_response({"error": "not found"}, status=404)
+    return web.json_response({"strategy": updated})
+
+
+async def api_strategy_builder_delete(request: web.Request) -> web.Response:
+    """DELETE /api/strategy-builder/strategies/{id} — delete a custom strategy."""
+    sid = request.match_info.get("id", "")
+    from strategy_store import delete_strategy
+    ok = delete_strategy(sid)
+    if not ok:
+        return web.json_response({"error": "not found"}, status=404)
+    return web.json_response({"deleted": sid})
+
+
+async def api_strategy_builder_test(request: web.Request) -> web.Response:
+    """POST /api/strategy-builder/test — test a strategy definition on live candles.
+
+    Body: { strategy_def: {...}, symbol: "APTUSDT", interval: "5m" }
+    Returns: { triggered: bool, score: float, reasons: [...], condition_results: [...] }
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+
+    strategy_def = body.get("strategy_def", {})
+    symbol   = body.get("symbol",   config.DEFAULT_SYMBOL)
+    interval = body.get("interval", config.DEFAULT_INTERVAL)
+
+    if symbol not in config.SYMBOLS:
+        symbol = config.DEFAULT_SYMBOL
+    if interval not in config.INTERVALS:
+        interval = config.DEFAULT_INTERVAL
+
+    try:
+        import data_feed
+        from strategies.custom import _eval_condition, evaluate as eval_custom
+
+        candles = data_feed.get_klines(symbol, interval)
+        result  = eval_custom(strategy_def, candles)
+
+        # Per-condition results for the UI
+        cond_results = []
+        for cond in strategy_def.get("conditions", []):
+            try:
+                fired = _eval_condition(cond, candles)
+            except Exception:
+                fired = False
+            cond_results.append({
+                "type":    cond.get("type"),
+                "label":   cond.get("label", cond.get("type")),
+                "params":  cond.get("params", {}),
+                "fired":   fired,
+            })
+
+        return web.json_response({
+            "triggered":        result["score"] != 0,
+            "score":            result["score"],
+            "reasons":          result["reasons"],
+            "condition_results": cond_results,
+            "symbol":           symbol,
+            "interval":         interval,
+        })
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=500)
+
+
+async def api_strategy_builder_get_config(_request: web.Request) -> web.Response:
+    """GET /api/strategy-builder/config — all strategy weights, enabled state, labels."""
+    from engine import STRATEGIES, _runtime_weights, _runtime_disabled
+    strategies_out = []
+    for key, (label, _fn) in STRATEGIES.items():
+        strategies_out.append({
+            "key":     key,
+            "label":   label,
+            "weight":  _runtime_weights.get(key, config.WEIGHTS.get(key, 0)),
+            "enabled": key not in _runtime_disabled,
+            "default_weight": config.WEIGHTS.get(key, 0),
+        })
+    return web.json_response({
+        "strategies":       strategies_out,
+        "signal_threshold": config.SIGNAL_THRESHOLD,
+        "strong_threshold": config.STRONG_THRESHOLD,
+    })
+
+
+async def api_strategy_builder_set_config(request: web.Request) -> web.Response:
+    """POST /api/strategy-builder/config — update weights and enabled state at runtime."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+
+    from engine import set_runtime_config, STRATEGIES
+
+    new_weights  = {}
+    new_disabled = set()
+    for item in body.get("strategies", []):
+        key = item.get("key", "")
+        if key not in STRATEGIES:
+            continue
+        if "weight" in item:
+            new_weights[key] = max(0, min(20, int(item["weight"])))
+        if item.get("enabled") is False:
+            new_disabled.add(key)
+
+    # Optional threshold updates
+    if "signal_threshold" in body:
+        config.SIGNAL_THRESHOLD = max(5, min(60, int(body["signal_threshold"])))
+    if "strong_threshold" in body:
+        config.STRONG_THRESHOLD = max(10, min(80, int(body["strong_threshold"])))
+
+    set_runtime_config(new_weights, new_disabled)
+    return web.json_response({"ok": True})
+
 def create_app() -> web.Application:
     app = web.Application()
     app.router.add_get("/",                       index)
@@ -578,6 +725,14 @@ def create_app() -> web.Application:
     app.router.add_get("/api/pending-limits",     api_pending_limits)
     app.router.add_get("/api/scanner",            api_scanner)
     app.router.add_post("/api/scanner/scan",       api_scanner_scan)
+    # Strategy Builder
+    app.router.add_get( "/api/strategy-builder/strategies",        api_strategy_builder_list)
+    app.router.add_post("/api/strategy-builder/strategies",        api_strategy_builder_create)
+    app.router.add_put( "/api/strategy-builder/strategies/{id}",   api_strategy_builder_update)
+    app.router.add_delete("/api/strategy-builder/strategies/{id}", api_strategy_builder_delete)
+    app.router.add_post("/api/strategy-builder/test",              api_strategy_builder_test)
+    app.router.add_get( "/api/strategy-builder/config",            api_strategy_builder_get_config)
+    app.router.add_post("/api/strategy-builder/config",            api_strategy_builder_set_config)
     app.router.add_get("/api/exchange",             api_exchange)
     app.router.add_post("/api/exchange",            api_exchange)
     app.router.add_get("/ws",                     ws_endpoint)

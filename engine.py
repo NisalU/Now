@@ -15,6 +15,19 @@ from strategies.helpers import atr
 
 SIGNALS_FILE = os.path.join(os.path.dirname(__file__), "signals.json")
 
+# Runtime weight/enabled overrides (set by strategy-builder API)
+_runtime_weights  = {}   # key -> weight override
+_runtime_disabled = set() # keys that are disabled at runtime
+_runtime_lock = threading.Lock()
+
+
+def set_runtime_config(weights: dict, disabled: set) -> None:
+    """Called by the server when the user saves strategy config changes."""
+    global _runtime_weights, _runtime_disabled
+    with _runtime_lock:
+        _runtime_weights  = dict(weights)
+        _runtime_disabled = set(disabled)
+
 STRATEGIES = {
     "ema_trend": ("EMA 7/25/99", lambda c, f: ema_trend.analyze(c)),
     "support_resistance": ("Support / Resistance", lambda c, f: support_resistance.analyze(c)),
@@ -88,7 +101,11 @@ class Engine:
         overlays = {}
         composite = 0.0
         for key, (label, fn) in STRATEGIES.items():
-            weight = config.WEIGHTS.get(key, 0)
+            # Runtime overrides from strategy builder
+            with _runtime_lock:
+                if key in _runtime_disabled:
+                    continue
+                weight = _runtime_weights.get(key, config.WEIGHTS.get(key, 0))
             try:
                 res = fn(candles, futures_stats)
             except Exception:  # noqa: BLE001
@@ -104,7 +121,36 @@ class Engine:
             })
             overlays.update(res.get("overlays", {}))
 
-        composite = max(-100.0, min(100.0, composite))
+        # ── Run user-created custom strategies ──────────────────────────────────
+    try:
+        from strategy_store import list_strategies
+        from strategies.custom import evaluate as _eval_custom
+        for _cs in list_strategies():
+            if not _cs.get("enabled", True):
+                continue
+            _cw = _cs.get("weight", 8)
+            try:
+                _cr = _eval_custom(_cs, candles)
+            except Exception:
+                traceback.print_exc()
+                _cr = {"score": 0, "reasons": ["custom strategy error"], "overlays": {}}
+            _contribution = _cr["score"] * _cw
+            composite += _contribution
+            breakdown.append({
+                "key":          "custom_" + _cs["id"][:8],
+                "label":        _cs["name"],
+                "weight":       _cw,
+                "score":        round(_cr["score"], 3),
+                "contribution": round(_contribution, 2),
+                "reasons":      _cr["reasons"],
+                "custom":       True,
+                "custom_id":    _cs["id"],
+            })
+            overlays.update(_cr.get("overlays", {}))
+    except Exception:
+        traceback.print_exc()
+
+    composite = max(-100.0, min(100.0, composite))
         direction = "LONG" if composite >= config.SIGNAL_THRESHOLD else \
                     "SHORT" if composite <= -config.SIGNAL_THRESHOLD else "NEUTRAL"
         strength = "STRONG" if abs(composite) >= config.STRONG_THRESHOLD else \
