@@ -72,6 +72,20 @@ The engine_composite_score already aggregates 10 strategies across the active ma
 • −20 to +20   → Neutral. Trade range boundaries only; WAIT if mid-range and structureless.
 NEVER contradict a score beyond ±30 without a clear sweep or failed breakout pattern.
 
+━━━ HTF DIRECTION RULE — HARD CONSTRAINT ━━━
+
+htf_data in the market_data block contains the 1-hour composite and trend.
+• htf_trend = -1 (1h lower highs/lows, bearish structure) → SHORT or WAIT ONLY.
+  FORBIDDEN from calling LONG when htf_trend=-1 AND htf_composite < -10.
+  Only override if engine_composite_score > +35 AND explicit sweep snap-back on current candle.
+• htf_trend = +1 (1h higher highs/lows, bullish structure) → LONG or WAIT ONLY.
+  FORBIDDEN from SHORT when htf_trend=+1 AND htf_composite > +10.
+  Only override if engine_composite_score < -35 AND confirmed sweep.
+• htf_trend = 0 (neutral 1h) → any direction, stricter R:R (≥ 2.0).
+
+A counter-trend 15m LONG in a 1h downtrend loses even when technically correct
+on 15m — macro sell-flow overwhelms 15m structure every time.
+
 ━━━ BEST TRADE SETUPS (ranked by quality) ━━━
 
 1. Liquidity sweep — price grabs below a key support (LONG) or above resistance (SHORT),
@@ -325,6 +339,16 @@ def _compact_market(analysis, symbol, regime, structural_quality, memory_rows):
         dp = fp_ov.get("delta_close_profile") or []
         if dp:
             footprint_data["delta_close_profile"] = dp[-6:]
+        cum_d = fp_ov.get("cumulative_delta_15")
+        if cum_d is not None:
+            footprint_data["cumulative_delta_15"] = round(cum_d, 2)
+
+    # Active chart patterns for AI context
+    _chart_pats = [
+        {"name": p.get("name", ""), "direction": p.get("direction", ""),
+         "confirmed": p.get("confirmed", False)}
+        for p in (ov.get("chart_patterns") or [])
+    ]
 
     return {
         "symbol":                analysis["symbol"],
@@ -344,6 +368,7 @@ def _compact_market(analysis, symbol, regime, structural_quality, memory_rows):
         "risk_warnings":         risk_notes,
         "recent_candles":        recent,
         "footprint_delta":       footprint_data,
+        "active_chart_patterns": _chart_pats,
     }
 
 
@@ -404,6 +429,52 @@ def _try_parse_json(content):
         return json.loads(repaired), repaired
     except (ValueError, TypeError):
         return None, None
+
+
+# ---------------------------------------------------------------------------
+# HTF direction override — applied after AI call, before signal recording
+# ---------------------------------------------------------------------------
+
+def _htf_direction_override(result, analysis, htf):
+    """Block counter-HTF-trend signals from the AI.
+
+    Fixes the main failure mode: AI calling LONG while 1h market is in
+    clear downtrend because the 15m engine score happened to be positive.
+    """
+    if not htf:
+        return result
+    decision      = result.get("decision", "WAIT")
+    htf_trend     = htf.get("trend", 0)
+    htf_composite = htf.get("composite", 0)
+    engine_score  = analysis.get("composite", 0)
+
+    if decision == "LONG" and htf_trend == -1 and htf_composite < -10:
+        if engine_score < 35:
+            result["decision"]   = "WAIT"
+            result["signal"]     = "WAIT"
+            result["confidence"] = 0
+            result["reason"]     = (
+                f"HTF override: 1h bearish (trend={htf_trend}, "
+                f"htf_composite={htf_composite:.0f}) blocks LONG. "
+                f"Engine {engine_score:.0f} not strong enough. Wait for 1h alignment."
+            )
+            log.info("[htf-override] %s LONG -> WAIT (htf=%.0f engine=%.0f)",
+                     analysis.get("symbol","?"), htf_composite, engine_score)
+
+    elif decision == "SHORT" and htf_trend == 1 and htf_composite > 10:
+        if engine_score > -35:
+            result["decision"]   = "WAIT"
+            result["signal"]     = "WAIT"
+            result["confidence"] = 0
+            result["reason"]     = (
+                f"HTF override: 1h bullish (trend={htf_trend}, "
+                f"htf_composite={htf_composite:.0f}) blocks SHORT. "
+                f"Engine {engine_score:.0f} not strong enough. Wait for 1h alignment."
+            )
+            log.info("[htf-override] %s SHORT -> WAIT (htf=%.0f engine=%.0f)",
+                     analysis.get("symbol","?"), htf_composite, engine_score)
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1093,6 +1164,9 @@ class AIAnalyst:
             gated=result.get("gated", False),
             gate_reason=result.get("gate_reason"),
         )
+
+        # ── HTF Direction Override — hard block counter-trend AI signals ──────
+        result = _htf_direction_override(result, analysis, htf)
 
         # ── Stage 6: Signal memory write + active-signal lock ─────────────
         if result["signal"] in ("LONG", "SHORT"):

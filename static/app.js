@@ -514,6 +514,26 @@
                  { time: tl.end.time,   value: tl.end.price }]);
       trendSeries.push(s);
     });
+    // ── Chart pattern overlays (H&S, triangles, flags, wedges, etc.) ────────
+    (ov.chart_patterns || []).forEach(function (p) {
+      var col = p.direction === 'bullish' ? C.green
+              : p.direction === 'bearish'  ? C.red
+              : C.amber;
+      var ls  = p.confirmed ? 0 : 2;
+      (p.lines || []).forEach(function (line) {
+        var s = chart.addLineSeries({
+          color: col, lineWidth: 1, lineStyle: ls,
+          priceLineVisible: false, lastValueVisible: false,
+          crosshairMarkerVisible: false,
+        });
+        s.setData([{ time: line.start.time, value: line.start.price },
+                   { time: line.end.time,   value: line.end.price   }]);
+        trendSeries.push(s);
+      });
+      (p.key_levels || []).forEach(function (kl) {
+        addPriceLine(kl.price, col, kl.label, 2);
+      });
+    });
     var markers = [];
     (ov.sweeps || []).forEach(function (sw) {
       markers.push({
